@@ -170,7 +170,10 @@ fn source_chunks(source: &str) -> Vec<SourceChunk> {
         lines += 1;
         if !opening
             && (fence.is_some() && lines >= CHUNK_LINES
-                || fence.is_none() && line.trim().is_empty())
+                || fence.is_none()
+                    && line.trim().is_empty()
+                    // Keep consecutive blank lines with their paragraph, not in empty rows.
+                    && source[end..].lines().next().is_none_or(|next| !next.trim().is_empty()))
         {
             chunks.push(SourceChunk {
                 range: start..end,

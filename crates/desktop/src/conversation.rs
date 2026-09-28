@@ -221,6 +221,11 @@ impl DesktopApp {
             return div().into_any_element();
         };
         let colors = palette(cx);
+        let reasoning_continues = row.message.role == Role::Reasoning
+            && row
+                .chunk
+                .as_ref()
+                .is_some_and(|chunk| chunk.range.end < row.message.text.len());
         let body = if let Some(selection) = selection {
             // Retained browsers bridge cache eviction, not rejection of oversized source.
             let html = if row.message.role == Role::Assistant
@@ -258,7 +263,14 @@ impl DesktopApp {
                     cx,
                 )
             } else {
-                dsh_markdown::plain_text(row.plain().to_owned().into(), Some(&selection))
+                let text = row.plain();
+                // The next row supplies the line break; selection also joins rows with '\n'.
+                let text = if reasoning_continues {
+                    text.strip_suffix('\n').unwrap_or(text)
+                } else {
+                    text
+                };
+                dsh_markdown::plain_text(text.to_owned().into(), Some(&selection))
                     .into_any_element()
             };
             let content = selection.wrap(content);
@@ -282,7 +294,10 @@ impl DesktopApp {
                     .as_ref()
                     .and_then(|chunk| chunk.gap_before)
                     .unwrap_or(0) as f32))
-                .when(row.message.role != Role::Assistant, |body| body.pb(px(4.0)))
+                .when(
+                    row.message.role != Role::Assistant && !reasoning_continues,
+                    |body| body.pb(px(4.0)),
+                )
                 .when(row.message.role == Role::User, |body| {
                     body.flex().justify_end()
                 })

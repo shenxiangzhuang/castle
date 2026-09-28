@@ -152,6 +152,10 @@ impl DesktopApp {
         let selection_pending = self.selection_pending();
         let preparing = selection_pending || matches!(self.core.run, RunState::Preparing);
         let empty = self.input.read(cx).value().trim().is_empty();
+        let runtime = self.selected_runtime.read(cx);
+        let pending_inputs = runtime.pending_inputs();
+        let input_action_pending = runtime.input_action_pending;
+        let input_error = runtime.input_error.clone();
         let model_configured = self.models[self.selected_model].model.has_api_key();
         let elapsed = self
             .selected_started_at
@@ -192,6 +196,55 @@ impl DesktopApp {
                 },
                 |this: &mut DesktopApp, window, cx| this.restore_chat_tail_after_layout(window, cx),
             ))
+            .when(!pending_inputs.is_empty(), |card| {
+                card.child(
+                    div().id("pending-messages").role(Role::Group).aria_label("Pending messages").flex().flex_col().gap_2().p_3()
+                        .border_b_1().border_color(colors.border)
+                        .child(div().flex().items_center().justify_between()
+                            .child(div().text_xs().text_color(colors.muted_text)
+                                .child(if running { "Pending messages" } else { "Pending messages · paused" }))
+                            .when(!running, |header| header.child(
+                                Button::new("resume-pending").label("Continue").ghost().compact()
+                                    .disabled(preparing || input_action_pending || !model_configured)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.selected_runtime.update(cx, |runtime, cx| runtime.resume_pending(window, cx));
+                                    })))))
+                        .child(div().id("pending-message-list").flex().flex_col().gap_2()
+                            .max_h(px(180.0)).overflow_y_scroll()
+                            .children(pending_inputs.into_iter().enumerate().map(|(index, input)| {
+                                let prioritize_id = input.input_id.clone();
+                                let edit_id = input.input_id.clone();
+                                let cancel_id = input.input_id;
+                                let prioritized = input.origin == kcastle_agent::InputOrigin::Steer;
+                                div().id(("pending-message", index)).role(Role::Group).aria_label(format!("{}: {}", if prioritized { "Waiting to join current task" } else { "Pending" }, input.input)).flex().items_center().gap_2()
+                                    .child(div().flex_1().min_w(px(0.0)).text_sm().child(input.input))
+                                    .when(prioritized, |row| row.child(div().text_xs().text_color(colors.muted_text)
+                                        .child(if running { "Waiting to join current task" } else { "Prioritized · paused" })))
+                                    .when(running && !prioritized, |row| row.child(
+                                        Button::new(("prioritize-input", index)).label("Prioritize").ghost().compact()
+                                            .tooltip("Join after the current response and tools finish")
+                                            .disabled(preparing || input_action_pending)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.selected_runtime.update(cx, |runtime, cx|
+                                                    runtime.change_pending(prioritize_id.clone(), true, window, cx));
+                                            }))))
+                                    .child(Button::new(("edit-input", index)).accessibility_label("Edit pending message")
+                                        .icon(crate::assets::DesktopIconName::SquarePen).ghost().compact()
+                                        .tooltip(if self.input.read(cx).value().is_empty() { "Edit pending message" } else { "Send or clear your draft before editing" })
+                                        .disabled(preparing || input_action_pending || self.composer_submitting || !self.input.read(cx).value().is_empty())
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.edit_pending(edit_id.clone(), window, cx);
+                                        })))
+                                    .child(Button::new(("cancel-input", index)).accessibility_label("Remove pending message").icon(IconName::Close).ghost().compact()
+                                        .tooltip("Remove pending message").disabled(preparing || input_action_pending)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.selected_runtime.update(cx, |runtime, cx|
+                                                runtime.change_pending(cancel_id.clone(), false, window, cx));
+                                        })))
+                            })))
+                )
+            })
+            .when_some(input_error, |card, error| card.child(div().px_3().py_2().text_sm().child(error)))
             .child(
                 div()
                     .id(if hero {
@@ -313,8 +366,9 @@ impl DesktopApp {
                                     .text_color(colors.muted_text)
                                     .child(format_duration(elapsed))
                             }))
-                            .child(if running {
+                            .child(if running && empty {
                                 Button::new("stop")
+                                    .when(cfg!(test), |button| button.debug_selector(|| "stop".into()))
                                     .accessibility_id(ids::COMPOSER_STOP)
                                     .icon(IconName::Close)
                                     .rounded(px(999.0))
@@ -323,14 +377,15 @@ impl DesktopApp {
                                     .into_any_element()
                             } else {
                                 Button::new("send")
+                                    .when(cfg!(test), |button| button.debug_selector(|| "send".into()))
                                     .accessibility_id(ids::COMPOSER_SEND)
                                     .role(Role::DefaultButton)
                                     .icon(IconName::ArrowUp)
                                     .primary()
-                                    .loading(preparing)
-                                    .disabled(empty || preparing || !model_configured)
+                                    .loading(preparing || self.composer_submitting)
+                                    .disabled(empty || preparing || self.composer_submitting || !model_configured)
                                     .rounded(px(999.0))
-                                    .tooltip("Send message")
+                                    .tooltip(if running { "Send after the current task" } else { "Send message" })
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.submit(window, cx)),
                                     )

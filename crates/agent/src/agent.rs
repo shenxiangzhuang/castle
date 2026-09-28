@@ -208,6 +208,27 @@ impl Agent {
         agent_loop::start(self, input.into())
     }
 
+    /// Start with a caller-owned identity so admission can be matched to its durable receipt.
+    pub fn start_input(self, input_id: crate::InputId, input: String) -> ActiveAgent {
+        agent_loop::start_input(self, input_id, input)
+    }
+
+    pub fn resume_pending(self) -> ActiveAgent {
+        agent_loop::resume_pending(self)
+    }
+
+    /// Mutate an idle queue, returning ownership and every committed projection update.
+    pub async fn cancel_pending_input(
+        self,
+        input_id: crate::InputId,
+    ) -> (
+        Self,
+        Vec<crate::session::store::CommitReceipt>,
+        Result<(), AgentError>,
+    ) {
+        agent_loop::cancel_pending_input(self, input_id).await
+    }
+
     pub fn start_compaction(self, instructions: Option<String>) -> ActiveAgent {
         agent_loop::start_compaction(self, instructions)
     }

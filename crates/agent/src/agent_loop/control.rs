@@ -153,9 +153,7 @@ pub enum AgentEvent {
 }
 
 pub(super) struct InputCommand {
-    pub(super) input_id: InputId,
-    pub(super) input: String,
-    pub(super) origin: InputOrigin,
+    pub(super) event: crate::SessionEvent,
     pub(super) acknowledgement: oneshot::Sender<Result<(), String>>,
 }
 
@@ -187,16 +185,36 @@ impl RunControl {
         self.submit(message.into(), InputOrigin::Queue).await
     }
 
+    pub async fn prioritize(&self, input_id: InputId) -> Result<(), AgentError> {
+        self.send_input_event(crate::SessionEvent::InputPrioritized { input_id })
+            .await
+    }
+
+    pub async fn cancel_input(&self, input_id: InputId) -> Result<(), AgentError> {
+        self.send_input_event(crate::SessionEvent::InputCancelled { input_id })
+            .await
+    }
+
     async fn submit(&self, input: String, origin: InputOrigin) -> Result<(), AgentError> {
         if input.trim().is_empty() {
             return Err(AgentError::EmptyInput);
         }
+        self.send_input_event(crate::SessionEvent::InputSubmitted {
+            input_id: InputId::random(),
+            input,
+            origin,
+        })
+        .await
+    }
+
+    async fn send_input_event(&self, event: crate::SessionEvent) -> Result<(), AgentError> {
+        if self.cancel.is_cancelled() {
+            return Err(AgentError::Aborted);
+        }
         let (acknowledgement, accepted) = oneshot::channel();
         self.commands
             .send(InputCommand {
-                input_id: InputId::random(),
-                input,
-                origin,
+                event,
                 acknowledgement,
             })
             .map_err(|error| AgentError::Task(error.to_string()))?;

@@ -760,6 +760,22 @@ impl SessionMachine {
                     .insert(input_id.clone(), ordinal);
                 self.pending_inputs_order.insert(ordinal, input_id.clone());
             }
+            SessionEvent::InputPrioritized { input_id } => {
+                if !self.pending_input_ordinals.contains_key(input_id) {
+                    return invalid("input is no longer pending");
+                }
+                self.inputs
+                    .get_mut(input_id)
+                    .expect("pending input exists")
+                    .origin = InputOrigin::Steer;
+            }
+            SessionEvent::InputCancelled { input_id } => {
+                let ordinal = self
+                    .pending_input_ordinals
+                    .remove(input_id)
+                    .ok_or_else(|| invalid_error("input is no longer pending"))?;
+                self.pending_inputs_order.remove(&ordinal);
+            }
             SessionEvent::InputAttached {
                 input_id,
                 step_id,
@@ -780,7 +796,9 @@ impl SessionMachine {
                     .inputs
                     .get(input_id)
                     .ok_or_else(|| invalid_error(format!("unknown input {input_id}")))?;
-                if input.attached_step.is_some() {
+                if !self.pending_input_ordinals.contains_key(input_id)
+                    || input.attached_step.is_some()
+                {
                     return invalid(format!("input {input_id} was attached twice"));
                 }
                 validate_attached_input(input_id, input, items)?;
@@ -1730,6 +1748,46 @@ mod tests {
             ));
         }
         events
+    }
+
+    proptest! {
+        #[test]
+        fn pending_input_actions_preserve_identity_and_replay(
+            actions in prop::collection::vec((0_u8..4, 0_usize..4), 0..80)
+        ) {
+            let mut machine = SessionMachine::default();
+            let mut events = Vec::new();
+            commit(&mut machine, &mut events, lifecycle("lifecycle"));
+            // Independent oracle: absent, queued, prioritized, attached, cancelled.
+            let mut states = [0_u8; 4];
+            let mut order = Vec::new();
+            for (sequence, (action, index)) in actions.into_iter().enumerate() {
+                let id = InputId::from_raw(format!("pending-{index}"));
+                let event = match action {
+                    0 => SessionEvent::InputSubmitted { input_id: id.clone(), input: format!("message-{index}"), origin: InputOrigin::Queue },
+                    1 => SessionEvent::InputPrioritized { input_id: id.clone() },
+                    2 => SessionEvent::InputCancelled { input_id: id.clone() },
+                    _ => SessionEvent::InputAttached { input_id: id.clone(), step_id: "step".into(),
+                        items: vec![InputItem::from(EasyInputMessage::from(format!("message-{index}")))] },
+                };
+                let allowed = if action == 0 { states[index] == 0 } else { matches!(states[index], 1 | 2) };
+                let planned = machine.plan_batch(vec![draft(&format!("action-{sequence}"), sequence as u64, event)]);
+                prop_assert_eq!(planned.is_ok(), allowed);
+                if let Ok(planned) = planned {
+                    events.extend_from_slice(planned.events());
+                    machine.apply_batch(planned).unwrap();
+                    states[index] = match action { 0 => 1, 1 => 2, 2 => 4, _ => 3 };
+                    if action == 0 { order.push(index); }
+                }
+                let expected = order.iter().copied().filter(|i| matches!(states[*i], 1 | 2))
+                    .map(|i| PendingInput { input_id: InputId::from_raw(format!("pending-{i}")),
+                        input: format!("message-{i}"), origin: if states[i] == 2 { InputOrigin::Steer } else { InputOrigin::Queue } })
+                    .collect::<Vec<_>>();
+                prop_assert_eq!(machine.pending_inputs(), expected);
+                prop_assert_eq!(machine.pending_inputs(), SessionMachine::from_events(&events).unwrap().pending_inputs());
+                prop_assert_eq!(machine.state().entries().len(), states.iter().filter(|state| **state == 3).count());
+            }
+        }
     }
 
     proptest! {

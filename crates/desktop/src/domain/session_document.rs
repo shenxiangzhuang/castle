@@ -13,6 +13,7 @@ pub(crate) struct SessionDocument {
     cursor: EventCursor,
     events: Vec<RecordedEvent>,
     graph: ExecutionGraph,
+    pending_inputs: Vec<InputId>,
     conversation_order: Vec<ConversationItemId>,
     trajectory_order: Vec<TrajectoryItemId>,
     request_order: Vec<TrajectoryRequestKey>,
@@ -122,6 +123,7 @@ struct InputNode {
     origin: InputOrigin,
     step_id: Option<StepId>,
     attached: bool,
+    cancelled: bool,
     attached_payload: String,
     timing: TimingMetrics,
     source_seqs: Vec<u64>,
@@ -711,6 +713,22 @@ impl SessionDocument {
         Ok(delta)
     }
 
+    pub(crate) fn pending_inputs(&self) -> Vec<kcastle_agent::PendingInput> {
+        self.pending_inputs
+            .iter()
+            .filter_map(|id| {
+                self.graph
+                    .inputs
+                    .get(id)
+                    .map(|input| kcastle_agent::PendingInput {
+                        input_id: id.clone(),
+                        input: input.text.clone(),
+                        origin: input.origin,
+                    })
+            })
+            .collect()
+    }
+
     pub(crate) fn conversation(&self) -> Vec<ConversationItemView<'_>> {
         self.conversation_order
             .iter()
@@ -960,19 +978,37 @@ impl SessionDocument {
                         origin: *origin,
                         step_id: None,
                         attached: false,
+                        cancelled: false,
                         attached_payload: String::new(),
                         timing,
                         source_seqs: vec![seq],
                     },
                 );
-                let conversation_id = ConversationItemId::Input(input_id.clone());
                 let trajectory_id = TrajectoryItemId::Input(input_id.clone());
-                self.conversation_order.push(conversation_id.clone());
+                self.pending_inputs.push(input_id.clone());
                 self.trajectory_order.push(trajectory_id.clone());
-                changes.conversation.push(conversation_id);
                 changes.trajectory.push(trajectory_id);
-                changes.conversation_order.append();
                 changes.trajectory_order.append();
+                changes.geometry = true;
+            }
+            SessionEvent::InputPrioritized { input_id } => {
+                if let Some(input) = self.graph.inputs.get_mut(input_id) {
+                    input.origin = InputOrigin::Steer;
+                    input.source_seqs.push(seq);
+                }
+                changes
+                    .trajectory
+                    .push(TrajectoryItemId::Input(input_id.clone()));
+            }
+            SessionEvent::InputCancelled { input_id } => {
+                self.pending_inputs.retain(|id| id != input_id);
+                if let Some(input) = self.graph.inputs.get_mut(input_id) {
+                    input.cancelled = true;
+                    input.source_seqs.push(seq);
+                }
+                changes
+                    .trajectory
+                    .push(TrajectoryItemId::Input(input_id.clone()));
                 changes.geometry = true;
             }
             SessionEvent::InputAttached {
@@ -980,6 +1016,11 @@ impl SessionDocument {
                 step_id,
                 items,
             } => {
+                self.pending_inputs.retain(|id| id != input_id);
+                self.conversation_order
+                    .push(ConversationItemId::Input(input_id.clone()));
+                changes.conversation_order.append();
+                changes.geometry = true;
                 let input = self
                     .graph
                     .inputs
@@ -1802,7 +1843,9 @@ impl SessionDocument {
                     title: None,
                     text: &input.text,
                     payload: nonempty(&input.attached_payload),
-                    status: if input.attached {
+                    status: if input.cancelled {
+                        ItemStatus::Aborted
+                    } else if input.attached {
                         ItemStatus::Completed
                     } else {
                         ItemStatus::Pending
@@ -1912,7 +1955,9 @@ impl SessionDocument {
                     title: input_title(input.origin),
                     text: &input.text,
                     payload: nonempty(&input.attached_payload),
-                    status: if input.attached {
+                    status: if input.cancelled {
+                        ItemStatus::Aborted
+                    } else if input.attached {
                         ItemStatus::Completed
                     } else {
                         ItemStatus::Pending
@@ -3155,6 +3200,54 @@ pub(crate) mod tests {
         let details = document.trajectory_by_id(&id).unwrap();
         assert_eq!(details.text, "hello");
         assert!(!details.source_seqs.is_empty());
+    }
+
+    #[test]
+    fn pending_inputs_do_not_appear_as_processed_chat_messages() {
+        let mut document = SessionDocument::from_events(fixture()[..3].to_vec()).unwrap();
+        let mut events = fixture()[..3].to_vec();
+        for event in [
+            SessionEvent::InputSubmitted {
+                input_id: "waiting".into(),
+                input: "do this next".into(),
+                origin: InputOrigin::Queue,
+            },
+            SessionEvent::InputPrioritized {
+                input_id: "waiting".into(),
+            },
+            SessionEvent::InputSubmitted {
+                input_id: "cancel".into(),
+                input: "remove this".into(),
+                origin: InputOrigin::Queue,
+            },
+            SessionEvent::InputCancelled {
+                input_id: "cancel".into(),
+            },
+        ] {
+            let event = recorded(document.cursor.next_seq, event);
+            events.push(event.clone());
+            document.apply_batch(vec![event]).unwrap();
+            assert!(document.conversation().is_empty());
+            assert_eq!(
+                document,
+                SessionDocument::from_events(events.clone()).unwrap()
+            );
+        }
+        assert_eq!(document.pending_inputs().len(), 1);
+        assert_eq!(document.pending_inputs()[0].origin, InputOrigin::Steer);
+        document
+            .apply_batch(vec![recorded(
+                document.cursor.next_seq,
+                SessionEvent::InputAttached {
+                    input_id: "waiting".into(),
+                    step_id: "step-1".into(),
+                    items: vec![InputItem::from(EasyInputMessage::from("do this next"))],
+                },
+            )])
+            .unwrap();
+        assert!(document.pending_inputs().is_empty());
+        assert_eq!(document.conversation().len(), 1);
+        assert_eq!(document.conversation()[0].text, "do this next");
     }
 
     #[test]

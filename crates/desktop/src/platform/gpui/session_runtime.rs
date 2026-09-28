@@ -12,7 +12,8 @@ use kcastle_agent::{
 use crate::agent_config::{ConfiguredModel, initial_session_title};
 use crate::domain::session_document::SessionDocument;
 use crate::domain::{ApprovalState, RunId, SessionView};
-use crate::settings::EnterBehavior;
+use kcastle_agent::{InputId, PendingInput, SessionEvent};
+use tokio::sync::oneshot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SessionRuntimeStatus {
@@ -301,6 +302,9 @@ pub(crate) struct SessionRuntime {
     allow_all_tools: bool,
     config: SessionConfig,
     tool_schemas: HashMap<String, String>,
+    submission_ack: Option<(InputId, oneshot::Sender<Result<(), String>>)>,
+    pub(crate) input_action_pending: bool,
+    pub(crate) input_error: Option<String>,
 }
 
 impl SessionRuntime {
@@ -350,6 +354,9 @@ impl SessionRuntime {
             allow_all_tools: config.allow_all_tools,
             config,
             tool_schemas,
+            submission_ack: None,
+            input_action_pending: false,
+            input_error: None,
         }
     }
 
@@ -598,47 +605,121 @@ impl SessionRuntime {
         true
     }
 
+    pub(crate) fn pending_inputs(&self) -> Vec<PendingInput> {
+        self.document.pending_inputs()
+    }
+
     pub(crate) fn submit(
         &mut self,
         input: String,
-        behavior: EnterBehavior,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<oneshot::Receiver<Result<(), String>>> {
         if input.trim().is_empty() {
-            return;
+            return None;
         }
+        let (ack, accepted) = oneshot::channel();
+        self.input_error = None;
         if let Some(control) = &self.control {
             if !self.lifecycle.allows(RuntimeOperation::SubmitDuringRun) {
-                return;
+                return None;
             }
             let control = control.clone();
-            cx.spawn_in(window, async move |this, cx| {
-                let result = match behavior {
-                    EnterBehavior::Steer => control.steer(input).await,
-                    EnterBehavior::Queue => control.queue(input).await,
-                };
-                if let Err(error) = result {
-                    let _ = cx.update(|_, app| {
-                        this.update(app, |runtime, cx| {
-                            runtime.fail_runtime(error.to_string());
-                            cx.notify();
-                        })
-                    });
-                }
+            cx.spawn_in(window, async move |_, _| {
+                let _ = ack.send(
+                    control
+                        .queue(input)
+                        .await
+                        .map_err(|error| error.to_string()),
+                );
             })
             .detach();
-            cx.notify();
-            return;
-        }
-        if !self.lifecycle.allows(RuntimeOperation::StartRun) {
-            return;
-        }
-        if self.session.path.as_os_str().is_empty() {
-            self.create_and_start(input, window, cx);
         } else {
-            self.start(input, window, cx);
+            if !self.lifecycle.allows(RuntimeOperation::StartRun) {
+                return None;
+            }
+            self.submission_ack = Some((InputId::random(), ack));
+            if self.session.path.as_os_str().is_empty() {
+                self.create_and_start(input, window, cx);
+            } else {
+                self.start(Some(input), window, cx);
+            }
         }
+        cx.notify();
+        Some(accepted)
+    }
+
+    pub(crate) fn resume_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.lifecycle.allows(RuntimeOperation::StartRun) && !self.pending_inputs().is_empty() {
+            self.input_error = None;
+            self.start(None, window, cx);
+        }
+    }
+
+    pub(crate) fn change_pending(
+        &mut self,
+        input_id: InputId,
+        prioritize: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<oneshot::Receiver<Result<(), String>>> {
+        if self.input_action_pending {
+            return None;
+        }
+        self.input_error = None;
+        let (acknowledge, accepted) = oneshot::channel();
+        if let Some(control) = self.control.clone() {
+            if !self.lifecycle.allows(RuntimeOperation::SubmitDuringRun) {
+                return None;
+            }
+            self.input_action_pending = true;
+            cx.spawn_in(window, async move |this, cx| {
+                let result = if prioritize {
+                    control.prioritize(input_id).await
+                } else {
+                    control.cancel_input(input_id).await
+                };
+                let result = result.map_err(|error| error.to_string());
+                let _ = this.update(cx, |runtime, cx| {
+                    runtime.input_action_pending = false;
+                    runtime.input_error = result.as_ref().err().cloned();
+                    cx.notify();
+                });
+                let _ = acknowledge.send(result);
+            })
+            .detach();
+        } else if !prioritize && self.lifecycle.begin_configuring() {
+            let Some(agent) = self.agent.take() else {
+                self.lifecycle
+                    .complete_config(SessionRuntimeStatus::Failed("Agent is unavailable".into()));
+                cx.notify();
+                return None;
+            };
+            self.input_action_pending = true;
+            cx.spawn_in(window, async move |this, cx| {
+                let (agent, receipts, result) = agent.cancel_pending_input(input_id).await;
+                let result = result.map_err(|error| error.to_string());
+                let _ = this.update(cx, |runtime, cx| {
+                    for receipt in receipts {
+                        runtime.apply_receipt(receipt);
+                    }
+                    runtime.sync_agent_metadata(&agent);
+                    runtime.agent = Some(agent);
+                    runtime.input_action_pending = false;
+                    runtime.input_error = result.as_ref().err().cloned();
+                    runtime
+                        .lifecycle
+                        .complete_config(SessionRuntimeStatus::Idle);
+                    cx.notify();
+                });
+                let _ = acknowledge.send(result);
+            })
+            .detach();
+        } else {
+            return None;
+        }
+        cx.notify();
+        Some(accepted)
     }
 
     fn create_and_start(&mut self, input: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -667,10 +748,10 @@ impl SessionRuntime {
                         if let Some(agent) = &mut runtime.agent {
                             agent.set_session(session);
                         }
-                        runtime.start(input, window, cx);
+                        runtime.start(Some(input), window, cx);
                     }
                     Err(error) => {
-                        runtime.lifecycle.fail(error.to_string());
+                        runtime.fail_runtime(error.to_string());
                         cx.notify();
                     }
                 })
@@ -679,9 +760,9 @@ impl SessionRuntime {
         .detach();
     }
 
-    fn start(&mut self, input: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn start(&mut self, input: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent) = self.agent.take() else {
-            self.lifecycle.fail("Agent is unavailable");
+            self.fail_runtime("Agent is unavailable");
             cx.notify();
             return;
         };
@@ -691,7 +772,16 @@ impl SessionRuntime {
         }
         let run = self.next_run.next();
         self.next_run = run;
-        let mut active = agent.start(input);
+        let mut active = if let Some(input) = input {
+            let id = self
+                .submission_ack
+                .as_ref()
+                .map(|(id, _)| id.clone())
+                .unwrap_or_else(InputId::random);
+            agent.start_input(id, input)
+        } else {
+            agent.resume_pending()
+        };
         self.control = Some(active.control());
         self.active_run = Some(run);
         self.started_at = Some(Instant::now());
@@ -721,6 +811,9 @@ impl SessionRuntime {
                 this.update(app, |runtime, cx| {
                     if runtime.active_run != Some(run) {
                         return;
+                    }
+                    if let Some((_, ack)) = runtime.submission_ack.take() {
+                        let _ = ack.send(Err("Message was not accepted; please retry".into()));
                     }
                     runtime.active_run = None;
                     runtime.control = None;
@@ -870,6 +963,14 @@ impl SessionRuntime {
     }
 
     fn apply_receipt(&mut self, receipt: CommitReceipt) {
+        if self.submission_ack.as_ref().is_some_and(|(id, _)| {
+            receipt.events.iter().any(|record| {
+            matches!(&record.event, SessionEvent::InputSubmitted { input_id, .. } if input_id == id)
+        })
+        }) && let Some((_, ack)) = self.submission_ack.take()
+        {
+            let _ = ack.send(Ok(()));
+        }
         let previous_revision = self.document.revisions().conversation;
         let committed_revision = receipt.revision;
         let committed_at_ms = receipt.committed_at_ms;
@@ -899,6 +1000,10 @@ impl SessionRuntime {
     }
 
     fn fail_runtime(&mut self, error: impl Into<RunFailure>) {
+        let error = error.into();
+        if let Some((_, ack)) = self.submission_ack.take() {
+            let _ = ack.send(Err(error.message().to_owned()));
+        }
         self.lifecycle.fail(error);
         if matches!(self.lifecycle.status(), SessionRuntimeStatus::Settling) {
             self.approvals.clear();

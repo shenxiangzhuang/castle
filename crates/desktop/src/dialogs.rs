@@ -19,7 +19,7 @@ use crate::agent_config::{ConfiguredModel, DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER
 use crate::app::{DesktopApp, active_model_index};
 use crate::assets::DesktopIconName;
 use crate::domain::Action;
-use crate::settings::{Appearance, EnterBehavior, ProviderModel, ProviderProfile};
+use crate::settings::{Appearance, ProviderModel, ProviderProfile};
 use crate::ui_automation::ids;
 use crate::ui_theme::{UiPalette, palette};
 
@@ -105,36 +105,6 @@ fn settings_dialog_view(
                 ),
             )
             .description("Reduce non-essential interface animation."),
-        )
-        .item(
-            SettingItem::new(
-                "Enter while busy",
-                SettingField::dropdown(
-                    vec![
-                        ("steer".into(), "Steer".into()),
-                        ("queue".into(), "Queue".into()),
-                    ],
-                    {
-                        let view = view.clone();
-                        move |cx: &App| match view.read(cx).settings.enter_behavior() {
-                            EnterBehavior::Steer => SharedString::from("steer"),
-                            EnterBehavior::Queue => SharedString::from("queue"),
-                        }
-                    },
-                    {
-                        let view = view.clone();
-                        move |value, cx: &mut App| {
-                            let behavior = if value == "queue" {
-                                EnterBehavior::Queue
-                            } else {
-                                EnterBehavior::Steer
-                            };
-                            view.update(cx, |app, cx| app.set_enter_behavior(behavior, cx));
-                        }
-                    },
-                ),
-            )
-            .description("Steer the active turn or queue a follow-up after it settles."),
         );
     let models_group = SettingGroup::new().item(
         SettingItem::render({

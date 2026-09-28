@@ -76,7 +76,39 @@ impl AgentLoop {
 }
 
 pub(crate) fn start(agent: Agent, input: String) -> ActiveAgent {
-    spawn(agent, Operation::Run(input))
+    spawn(agent, Operation::Run(Some((InputId::random(), input))))
+}
+
+pub(crate) fn start_input(agent: Agent, input_id: InputId, input: String) -> ActiveAgent {
+    spawn(agent, Operation::Run(Some((input_id, input))))
+}
+
+pub(crate) fn resume_pending(agent: Agent) -> ActiveAgent {
+    spawn(agent, Operation::Run(None))
+}
+
+// Return catch-up receipts even on failure so an idle host can keep its projection current.
+pub(crate) async fn cancel_pending_input(
+    agent: Agent,
+    input_id: InputId,
+) -> (Agent, Vec<CommitReceipt>, Result<(), AgentError>) {
+    let (sink, mut receipts) = mpsc::unbounded_channel();
+    let mut owner = AgentLoop::new(agent);
+    let result = async {
+        owner.acquire_writer_and_reload(&sink).await?;
+        owner.recover_interrupted(&sink).await?;
+        owner
+            .commit_now(vec![SessionEvent::InputCancelled { input_id }], &sink)
+            .await?;
+        Ok(())
+    }
+    .await;
+    owner.agent.writer = None;
+    let mut committed = Vec::new();
+    while let Ok(AgentEvent::SessionCommitted(receipt)) = receipts.try_recv() {
+        committed.push(receipt);
+    }
+    (owner.into_agent(), committed, result)
 }
 
 pub(crate) fn start_compaction(agent: Agent, instructions: Option<String>) -> ActiveAgent {
@@ -84,7 +116,7 @@ pub(crate) fn start_compaction(agent: Agent, instructions: Option<String>) -> Ac
 }
 
 enum Operation {
-    Run(String),
+    Run(Option<(InputId, String)>),
     Compact(Option<String>),
     #[cfg(test)]
     Panic,
@@ -207,26 +239,38 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 impl AgentLoop {
     async fn run(
         &mut self,
-        input: String,
+        input: Option<(InputId, String)>,
         mut channels: RunChannels,
         events: &EventSink,
     ) -> Result<(), AgentError> {
-        if input.trim().is_empty() {
-            return Err(AgentError::EmptyInput);
-        }
         self.recover_interrupted(events).await?;
+        if channels.cancel.is_cancelled() {
+            return Err(AgentError::Aborted);
+        }
+        let mut initial = Vec::new();
+        let (input_id, input) = if let Some((input_id, input)) = input {
+            if input.trim().is_empty() {
+                return Err(AgentError::EmptyInput);
+            }
+            initial.push(SessionEvent::InputSubmitted {
+                input_id: input_id.clone(),
+                input: input.clone(),
+                origin: InputOrigin::Initial,
+            });
+            (input_id, input)
+        } else {
+            let pending = self
+                .pending_input(InputOrigin::Steer)
+                .or_else(|| self.pending_input(InputOrigin::Queue))
+                .ok_or_else(|| AgentError::Task("no pending messages".into()))?;
+            (pending.input_id, pending.input)
+        };
 
         let run_id = RunId::random();
         let turn_id = TurnId::random();
         let step_id = StepId::random();
-        let input_id = InputId::random();
-        let items = user_items(input.clone());
-        let initial = vec![
-            SessionEvent::InputSubmitted {
-                input_id: input_id.clone(),
-                input: input.clone(),
-                origin: InputOrigin::Initial,
-            },
+        let items = user_items(input);
+        initial.extend([
             SessionEvent::RunStarted {
                 run_id: run_id.clone(),
             },
@@ -243,7 +287,7 @@ impl AgentLoop {
                 step_id: step_id.clone(),
                 items,
             },
-        ];
+        ]);
         self.commit_now(initial, events).await?;
         let result = self
             .run_loop(run_id, turn_id, step_id, &mut channels, events)
@@ -267,6 +311,9 @@ impl AgentLoop {
     ) -> Result<RunSummary, AgentError> {
         let mut request_count = 0_usize;
         loop {
+            if channels.cancel.is_cancelled() {
+                return Err(AgentError::Aborted);
+            }
             if request_count >= self.agent.max_turns {
                 return Err(AgentError::MaxTurns(self.agent.max_turns));
             }
@@ -292,6 +339,9 @@ impl AgentLoop {
                 self.execute_tools(&calls, channels, events).await?;
             }
             self.drain_inputs(channels, events).await?;
+            if channels.cancel.is_cancelled() {
+                return Err(AgentError::Aborted);
+            }
 
             if let Some(input) = self.pending_input(InputOrigin::Steer) {
                 let next_step = StepId::random();
@@ -1087,29 +1137,24 @@ impl AgentLoop {
         events: &EventSink,
     ) -> Result<(), AgentError> {
         let InputCommand {
-            input_id,
-            input,
-            origin,
+            event,
             acknowledgement,
         } = command;
-        let committed = self
-            .commit_now(
-                vec![SessionEvent::InputSubmitted {
-                    input_id,
-                    input,
-                    origin,
-                }],
-                events,
-            )
-            .await;
+        let committed = self.commit_now(vec![event], events).await;
         match committed {
             Ok(_) => {
                 let _ = acknowledgement.send(Ok(()));
                 Ok(())
             }
             Err(error) => {
-                let _ = acknowledgement.send(Err(error.to_string()));
-                Err(error)
+                let rejected = matches!(error, AgentError::Machine(_));
+                let _ = acknowledgement.send(Err(if rejected {
+                    "This message has already started or was removed".into()
+                } else {
+                    error.to_string()
+                }));
+                // A stale UI action loses to attachment/cancellation; it must not abort the run.
+                if rejected { Ok(()) } else { Err(error) }
             }
         }
     }
@@ -3023,6 +3068,89 @@ mod tests {
         drop(agent_a);
         drop(agent_b);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_messages_can_be_prioritized_cancelled_stopped_and_resumed() {
+        let (model, first_request, _release, server) =
+            gated_two_request_text_stream_model("done").await;
+        let agent = Agent::new(model, "test", Session::memory(), ".");
+        let store = agent.store.clone();
+        let session_id = agent.info.id.clone();
+        let active = agent.start("first");
+        let control = active.control();
+        timeout(Duration::from_secs(3), first_request)
+            .await
+            .unwrap()
+            .unwrap();
+        for text in ["next", "urgent", "remove"] {
+            control.queue(text).await.unwrap();
+        }
+        let loaded = store.load(&session_id).unwrap();
+        let pending = SessionMachine::from_events(&loaded.events().cloned().collect::<Vec<_>>())
+            .unwrap()
+            .pending_inputs();
+        control
+            .prioritize(pending[1].input_id.clone())
+            .await
+            .unwrap();
+        control
+            .cancel_input(pending[2].input_id.clone())
+            .await
+            .unwrap();
+        // A stale second click must be rejected without killing the current operation.
+        assert!(
+            control
+                .prioritize(pending[2].input_id.clone())
+                .await
+                .is_err()
+        );
+        control.queue("still running").await.unwrap();
+        control.abort();
+        let mut agent = timeout(Duration::from_secs(3), active.finish())
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+        assert_eq!(agent.machine.pending_inputs().len(), 3);
+        let last_id = agent.machine.pending_inputs()[2].input_id.clone();
+        let (updated, receipts, result) = agent.cancel_pending_input(last_id).await;
+        result.unwrap();
+        assert!(receipts.iter().any(|receipt| {
+            receipt
+                .events
+                .iter()
+                .any(|record| matches!(record.event, SessionEvent::InputCancelled { .. }))
+        }));
+        agent = updated;
+        let (model, first_request, release, server) =
+            gated_two_request_text_stream_model("done").await;
+        agent.set_model(model);
+        let active = agent.resume_pending();
+        timeout(Duration::from_secs(3), first_request)
+            .await
+            .unwrap()
+            .unwrap();
+        release.send(()).unwrap();
+        let agent = timeout(Duration::from_secs(3), active.finish())
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert!(agent.machine.pending_inputs().is_empty());
+        let loaded = agent.store.load(&session_id).unwrap();
+        let attached = loaded
+            .events()
+            .filter_map(|record| match &record.event {
+                SessionEvent::InputAttached { input_id, .. } => Some(input_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &attached[1..],
+            &[pending[1].input_id.clone(), pending[0].input_id.clone()]
+        );
+        assert_eq!(attached.len(), 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

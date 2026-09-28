@@ -639,6 +639,17 @@ mod tests {
                 },
             ));
             seq = seq.saturating_add(1);
+            events.push(recorded(
+                seq,
+                SessionEvent::InputAttached {
+                    input_id: InputId::from_raw(format!("history-{index}")),
+                    step_id: step_id.clone(),
+                    items: vec![kcastle_agent::InputItem::from(
+                        kcastle_agent::EasyInputMessage::from(format!("history item {index}")),
+                    )],
+                },
+            ));
+            seq = seq.saturating_add(1);
         }
         events.push(recorded(
             seq,

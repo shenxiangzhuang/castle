@@ -3007,6 +3007,7 @@ mod tests {
         startup.agent.set_model(model);
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        let source = view.read_with(cx, |app, _| app.selected_runtime.clone());
         cx.update(|window, cx| {
             view.update(cx, |app, cx| {
                 app.input.update(cx, |input, cx| {
@@ -3025,8 +3026,9 @@ mod tests {
             })
         });
         let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        // The background source still owns its database until its run has joined.
         while view.read_with(cx, |app, cx| {
-            app.composer_submitting || app.selected_runtime.read(cx).is_active()
+            app.composer_submitting || source.read(cx).is_active()
         }) {
             assert!(Instant::now() < deadline, "submission did not settle");
             cx.run_until_parked();
@@ -3040,6 +3042,7 @@ mod tests {
                 "late receipt from another session changed the current scroll policy"
             );
         });
+        drop(source);
         close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }

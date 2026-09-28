@@ -2476,10 +2476,9 @@ mod tests {
         );
     }
 
-    // Upgrade acceptance probe: do not replace the shared renderer until this
-    // and the native visual checklist in gpui-kit-0.6.4-validation.md pass.
+    // Replacing the shared renderer must preserve rendered-copy semantics.
     #[gpui_kit::test]
-    #[ignore = "gpui-kit 0.6.4 drops list/task markers in plain-text copy"]
+    #[ignore = "gpui-kit 0.7.0 drops list/task markers in plain-text copy"]
     fn framework_markdown_list_copy_acceptance(cx: &mut TestAppContext) {
         use gpui_kit::AppContext as _;
         cx.update(crate::init_ui);

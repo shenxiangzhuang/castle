@@ -47,7 +47,7 @@ preserve stable record arcs.
 
 ### Framework controls
 
-GPUI Kit 0.6.4 owns popup positioning, menu keyboard navigation and selection, and
+GPUI Kit 0.7.0 owns popup positioning, menu keyboard navigation and selection, and
 modal focus trapping, Escape/Enter routing, and backdrop dismissal. The application
 retains only the current composer menu identity and the modal's business data.
 `PopupMenu` submenus replace the former highlighted-item reducer and keyboard dispatcher.
@@ -55,10 +55,14 @@ The root key handler leaves dialog/menu keys to the framework. Menu actions stil
 existing session/configuration guards. The open-state projection continues hiding native
 HTML previews while either kind of overlay covers them.
 
-Chat and Trajectory keep their shared Markdown renderer. A native 0.6.4 TextView
-comparison found lost ordered-list start numbers and list/task markers in plain-text
-copy, so the Trajectory pilot was withdrawn rather than retaining two renderers.
-See [the acceptance record](../development/gpui-kit-0.6.4-validation.md).
+Both application and startup-error windows use `gpui_kit::open_window`, which installs
+the framework Root. Base Dialog supplies centered placement; the custom popup retains
+its pointer occlusion and application accessibility labels. Modal business state and
+HTML-preview visibility remain application-owned.
+
+Chat and Trajectory keep their shared Markdown renderer. TextView 0.7.0 fixes ordered-list
+start numbers, but still omits list/task markers in plain-text copy. Source copying
+returns Markdown and does not preserve the application's rendered-copy contract.
 Chat demand, cancellation, cache admission and atomic streaming publication are unchanged.
 
 ### Chat viewport

@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use crate::app::{DesktopApp, SidebarSessionStatus, same_path, session_age};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
@@ -180,20 +179,12 @@ impl DesktopApp {
                     .child(
                         Button::new("search-sessions")
                             .accessibility_id(ids::SESSION_SEARCH_TOGGLE)
-                            .icon(if self.core.sidebar.search_sessions {
-                                IconName::Close
-                            } else {
-                                IconName::Search
-                            })
+                            .icon(IconName::Search)
                             .ghost()
                             .compact()
-                            .tooltip(if self.core.sidebar.search_sessions {
-                                "Close search"
-                            } else {
-                                "Search sessions"
-                            })
+                            .tooltip("Search sessions")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_session_search(window, cx)
+                                this.open_session_search_dialog(window, cx)
                             })),
                     ),
             )
@@ -225,21 +216,26 @@ impl DesktopApp {
 
     fn workspace_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
-        div().flex().relative().px_3().child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .h(px(32.0))
-                .w_full()
-                .px_1()
-                .text_sm()
-                .text_color(colors.muted_text)
-                .when(!self.core.sidebar.search_sessions, |row| {
-                    row.child("Workspaces")
-                })
-                .when(!self.core.sidebar.search_sessions, |row| {
-                    row.child(
+        div()
+            .id("workspace-header")
+            .when(cfg!(test), |element| {
+                element.debug_selector(|| "workspace-header".into())
+            })
+            .flex()
+            .relative()
+            .px_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(32.0))
+                    .w_full()
+                    .px_1()
+                    .text_sm()
+                    .text_color(colors.muted_text)
+                    .child("Workspaces")
+                    .child(
                         div()
                             .flex()
                             .items_center()
@@ -265,37 +261,8 @@ impl DesktopApp {
                                         this.add_project(window, cx)
                                     })),
                             ),
-                    )
-                })
-                .when(self.core.sidebar.search_sessions, |row| {
-                    row.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .w_full()
-                            .gap_1()
-                            .child(
-                                div().flex_1().min_w(px(0.0)).child(
-                                    Input::new(&self.session_search)
-                                        .accessibility_id(ids::SESSION_SEARCH_INPUT)
-                                        .aria_label("Search sessions")
-                                        .small()
-                                        .cleanable(true),
-                                ),
-                            )
-                            .child(
-                                Button::new("close-session-search")
-                                    .icon(IconName::Close)
-                                    .ghost()
-                                    .compact()
-                                    .tooltip("Close search")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_session_search(window, cx)
-                                    })),
-                            ),
-                    )
-                }),
-        )
+                    ),
+            )
     }
 
     fn sidebar_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -374,9 +341,8 @@ impl DesktopApp {
 
     fn workspace_tree(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let colors = palette(cx);
-        let query = self.session_search.read(cx).value().trim().to_lowercase();
         if !self.core.sidebar.group_by_workspace {
-            return self.flat_session_tree(&query, colors, cx);
+            return self.flat_session_tree(colors, cx);
         }
         div()
             .id("workspace-tree")
@@ -398,8 +364,7 @@ impl DesktopApp {
                     .core
                     .workspace
                     .expanded_projects
-                    .contains(&project.path)
-                    || !query.is_empty();
+                    .contains(&project.path);
                 let mut sessions = if active || expanded {
                     self.project_sessions
                         .get(&project.sessions_dir)
@@ -418,10 +383,9 @@ impl DesktopApp {
                         .visible_sessions_by_project
                         .get(&project.path)
                         .copied(),
-                    !query.is_empty(),
                     sessions.len(),
                 );
-                let has_more_sessions = query.is_empty() && sessions.len() > visible_session_count;
+                let has_more_sessions = sessions.len() > visible_session_count;
                 let project_name =
                     sidebar_label(&project.name, metrics::SIDEBAR_LABEL_UNITS);
                 let preview_project_name = project.name.clone();
@@ -554,7 +518,7 @@ impl DesktopApp {
                         div()
                             .flex()
                             .flex_col()
-                            .children(sessions.into_iter().take(visible_session_count).enumerate().filter_map(|(session_index, session)| {
+                            .children(sessions.into_iter().take(visible_session_count).enumerate().map(|(session_index, session)| {
                                 let path = session.path.clone();
                                 let keyboard_path = path.clone();
                                 let selected =
@@ -567,18 +531,6 @@ impl DesktopApp {
                                     "New Session".into()
                                 } else {
                                     session.title.clone()
-                                };
-                                let title_matches = title.to_lowercase().contains(&query);
-                                let content_matches = self.session_document_matches(&path, &query);
-                                if !query.is_empty() && !title_matches && !content_matches {
-                                    return None;
-                                }
-                                let display_title = if !query.is_empty() && !title_matches {
-                                    self.session_document_summary(&path, &query)
-                                        .map(|summary| format!("{title} · {summary}"))
-                                        .unwrap_or_else(|| title.clone())
-                                } else {
-                                    title.clone()
                                 };
                                 let group = SharedString::from(format!("session-{index}-{session_index}"));
                                 let target_active = self.session_is_active(index, &path, cx);
@@ -595,13 +547,12 @@ impl DesktopApp {
                                 });
                                 let open_path = path.clone();
                                 let automation_id = ui_automation::session(&project_id, &path);
-                                Some(
-                                    session_row(
+                                session_row(
                                         group.clone(),
                                         group.clone(),
                                         SessionRowData {
                                             automation_id,
-                                            title: display_title,
+                                            title: title.clone(),
                                             trailing: SessionRowTrailing {
                                                 age: age.clone(),
                                                 status,
@@ -625,8 +576,7 @@ impl DesktopApp {
                                             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                                 this.open_project_session(index, keyboard_path.clone(), window, cx);
                                             }
-                                        })),
-                                )
+                                        }))
                             }))
                             .children(has_more_sessions.then(|| {
                                 div()
@@ -669,12 +619,7 @@ impl DesktopApp {
             .into_any_element()
     }
 
-    fn flat_session_tree(
-        &self,
-        query: &str,
-        colors: UiPalette,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
+    fn flat_session_tree(&self, colors: UiPalette, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let mut sessions = self
             .project_store
             .projects()
@@ -696,7 +641,7 @@ impl DesktopApp {
                         )
                     })
             })
-            .filter_map(|(project_index, project_id, project_name, session)| {
+            .map(|(project_index, project_id, project_name, session)| {
                 let selected = project_index == self.core.workspace.active_project
                     && same_path(&session.path, &self.core.session.current);
                 let title = if selected && self.core.session_view.conversation.title != "New chat" {
@@ -706,13 +651,7 @@ impl DesktopApp {
                 } else {
                     session.title.clone()
                 };
-                if !query.is_empty()
-                    && !title.to_lowercase().contains(query)
-                    && !self.session_document_matches(&session.path, query)
-                {
-                    return None;
-                }
-                Some((
+                (
                     project_index,
                     project_id,
                     project_name,
@@ -720,7 +659,7 @@ impl DesktopApp {
                     session.path,
                     title,
                     selected,
-                ))
+                )
             })
             .collect::<Vec<_>>();
         sessions.sort_by_key(|(_, _, _, modified, _, _, _)| *modified);
@@ -1150,16 +1089,8 @@ fn sidebar_text_units(value: &str) -> usize {
         .sum()
 }
 
-fn visible_session_count(
-    configured_limit: Option<usize>,
-    search_active: bool,
-    total: usize,
-) -> usize {
-    if search_active {
-        total
-    } else {
-        configured_limit.unwrap_or(INITIAL_SESSION_LIMIT).min(total)
-    }
+fn visible_session_count(configured_limit: Option<usize>, total: usize) -> usize {
+    configured_limit.unwrap_or(INITIAL_SESSION_LIMIT).min(total)
 }
 
 #[cfg(test)]
@@ -1180,11 +1111,10 @@ mod tests {
     }
 
     #[test]
-    fn session_paging_starts_at_five_and_search_bypasses_the_limit() {
-        assert_eq!(visible_session_count(None, false, 24), 5);
-        assert_eq!(visible_session_count(Some(15), false, 24), 15);
-        assert_eq!(visible_session_count(Some(25), false, 24), 24);
-        assert_eq!(visible_session_count(None, true, 24), 24);
+    fn session_paging_starts_at_five() {
+        assert_eq!(visible_session_count(None, 24), 5);
+        assert_eq!(visible_session_count(Some(15), 24), 15);
+        assert_eq!(visible_session_count(Some(25), 24), 24);
     }
 
     #[test]

@@ -37,7 +37,6 @@ pub(crate) struct ComposerState {
 
 #[derive(Debug)]
 pub(crate) struct SidebarState {
-    pub(crate) search_sessions: bool,
     pub(crate) options_open: bool,
     pub(crate) group_by_workspace: bool,
     pub(crate) sort_by_recent: bool,
@@ -47,7 +46,6 @@ pub(crate) struct SidebarState {
 impl Default for SidebarState {
     fn default() -> Self {
         Self {
-            search_sessions: false,
             options_open: false,
             group_by_workspace: true,
             sort_by_recent: true,

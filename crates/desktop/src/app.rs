@@ -382,10 +382,17 @@ impl DesktopApp {
         let search_subscription = cx.subscribe_in(
             &session_search,
             window,
-            |_this, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) {
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    if let Some(Modal::SessionSearch { selected }) = &mut this.modal {
+                        *selected = 0;
+                    }
                     cx.notify();
                 }
+                InputEvent::PressEnter { .. } => {
+                    this.open_selected_session_search_result(window, cx)
+                }
+                _ => {}
             },
         );
         let trajectory_subscription = cx.subscribe_in(
@@ -1571,20 +1578,6 @@ impl DesktopApp {
         }
     }
 
-    pub(crate) fn toggle_session_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let opening = !self.core.sidebar.search_sessions;
-        self.dispatch(Action::ToggleSessionSearch, window, cx);
-        if opening {
-            self.session_search
-                .update(cx, |input, cx| input.focus(window, cx));
-        } else {
-            self.session_search
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            self.input.update(cx, |input, cx| input.focus(window, cx));
-        }
-        cx.notify();
-    }
-
     pub(crate) fn toggle_sidebar_options(&mut self, cx: &mut Context<Self>) {
         self.dispatch_local(Action::ToggleSidebarOptions, cx);
     }
@@ -1799,13 +1792,7 @@ impl DesktopApp {
             return;
         }
         self.cancel_timeline_gesture();
-        let was_searching = self.core.sidebar.search_sessions;
         self.dispatch(Action::DismissTransient, window, cx);
-        if was_searching {
-            self.session_search
-                .update(cx, |input, cx| input.set_value("", window, cx));
-            self.input.update(cx, |input, cx| input.focus(window, cx));
-        }
         cx.notify();
     }
 
@@ -3216,6 +3203,95 @@ mod tests {
         cx.simulate_click(point(px(1.0), px(1.0)), Default::default());
         cx.run_until_parked();
         view.read_with(cx, |app, _| assert!(app.modal.is_none()));
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn session_search_uses_a_dialog_without_replacing_the_workspace_header(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-session-search-dialog-{}",
+            kcastle_agent::SessionId::new()
+        ));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        cx.simulate_resize(gpui_kit::size(px(1180.0), px(720.0)));
+        cx.run_until_parked();
+        let workspace_header = cx.debug_bounds("workspace-header").unwrap();
+
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                let project = app.project_store.project(0).unwrap().clone();
+                let current_session = app.core.session.current.clone();
+                app.project_sessions.insert(
+                    project.sessions_dir,
+                    vec![
+                        SessionInfo {
+                            id: SessionId::new(),
+                            project_id: project.id.as_str().to_owned(),
+                            path: root.join("older-session"),
+                            title: "Older session".into(),
+                            created_at: 1,
+                            updated_at: 1,
+                        },
+                        SessionInfo {
+                            id: SessionId::new(),
+                            project_id: project.id.as_str().to_owned(),
+                            path: current_session,
+                            title: "Newer session".into(),
+                            created_at: 2,
+                            updated_at: 2,
+                        },
+                    ],
+                );
+                app.open_session_search_dialog(window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.debug_bounds("workspace-header"), Some(workspace_header));
+        let dialog = cx.debug_bounds("session-search-dialog").unwrap();
+        assert_eq!(dialog.top(), px(96.0));
+        cx.update(|window, cx| {
+            assert!(view.read(cx).modal_focus.contains_focused(window, cx));
+        });
+
+        cx.simulate_keystrokes("down");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.modal,
+                Some(Modal::SessionSearch { selected: 1 })
+            ));
+        });
+
+        cx.simulate_input("missing");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(matches!(
+                app.modal,
+                Some(Modal::SessionSearch { selected: 0 })
+            ));
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |app, cx| {
+            assert!(app.modal.is_none());
+            assert!(app.session_search.read(cx).value().is_empty());
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| app.open_session_search_dialog(window, cx))
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.modal.is_none()));
+
         close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }

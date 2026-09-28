@@ -34,12 +34,6 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.composer.menu = menu;
             state.sidebar.options_open = false;
         }
-        Action::ToggleSessionSearch => {
-            state.sidebar.search_sessions = !state.sidebar.search_sessions;
-            if state.sidebar.search_sessions {
-                state.sidebar.options_open = false;
-            }
-        }
         Action::ToggleSidebarOptions => {
             state.sidebar.options_open = !state.sidebar.options_open;
             if state.sidebar.options_open {
@@ -53,7 +47,6 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::DismissTransient => {
             state.composer.menu = None;
             state.sidebar.options_open = false;
-            state.sidebar.search_sessions = false;
             state.trajectory.selected_range = None;
         }
         Action::SetSidebarGrouping(group_by_workspace) => {

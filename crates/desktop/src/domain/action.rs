@@ -22,7 +22,6 @@ pub(crate) enum Action {
     SelectDetails(Option<DetailsSelection>),
     SetDetailsTab(DetailsTab),
     SetComposerMenu(Option<ComposerMenu>),
-    ToggleSessionSearch,
     ToggleSidebarOptions,
     CloseTransientOverlays,
     DismissTransient,

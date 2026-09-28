@@ -3382,6 +3382,7 @@ mod tests {
                 source_id
             );
         });
+        drop(source);
         close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }

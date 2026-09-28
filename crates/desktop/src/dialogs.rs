@@ -1504,9 +1504,6 @@ impl DesktopApp {
         Some(
             gpui_kit::base::Dialog::new(cx)
                 .focus_handle(self.modal_focus.clone())
-                .flex()
-                .items_center()
-                .justify_center()
                 .backdrop(div().absolute().inset_0().bg(colors.overlay))
                 .on_ok(move |_, window, cx| {
                     // Only the rename form submits on Enter; destructive actions require
@@ -1518,6 +1515,9 @@ impl DesktopApp {
                 .popup(
                     div()
                         .id("modal-content")
+                        .when(cfg!(test), |element| {
+                            element.debug_selector(|| "modal-content".into())
+                        })
                         .role(gpui_kit::accesskit::Role::Dialog)
                         .occlude()
                         .accessibility_id(ids::DIALOG)

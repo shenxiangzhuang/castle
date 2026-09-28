@@ -13,7 +13,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use gpui_kit::component::{Root, Theme, ThemeMode};
+use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
     App, AppContext, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
@@ -178,23 +178,21 @@ fn open_desktop_window(
         Appearance::Light => Theme::change(ThemeMode::Light, None, cx),
         Appearance::Dark => Theme::change(ThemeMode::Dark, None, cx),
     }
-    cx.open_window(desktop_window_options(cx), move |window, cx| {
-        let view = cx.new(|cx| {
+    gpui_kit::open_window(desktop_window_options(cx), cx, move |window, cx| {
+        cx.new(|cx| {
             let app = DesktopApp::new(startup, window, cx);
             #[cfg(debug_assertions)]
             let app = html_preview::native_fixture(app);
             app
-        });
-        cx.new(|cx| Root::new(view, window, cx))
+        })
     })?;
     Ok(())
 }
 
 fn open_startup_error_window(message: String, cx: &mut App) -> Result<(), Box<dyn Error>> {
     Theme::sync_system_appearance(None, cx);
-    cx.open_window(desktop_window_options(cx), move |window, cx| {
-        let view = cx.new(|_| StartupErrorView { message });
-        cx.new(|cx| Root::new(view, window, cx))
+    gpui_kit::open_window(desktop_window_options(cx), cx, move |_, cx| {
+        cx.new(|_| StartupErrorView { message })
     })?;
     Ok(())
 }

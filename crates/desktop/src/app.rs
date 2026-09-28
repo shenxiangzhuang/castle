@@ -2789,7 +2789,18 @@ mod tests {
         view.read_with(cx, |app, _| {
             assert!(app.modal.is_some(), "empty title must not submit")
         });
-        cx.simulate_keystrokes("escape");
+        let popup = cx.debug_bounds("modal-content").unwrap();
+        assert!(
+            (popup.center().x - px(360.0)).abs() <= px(1.0)
+                && (popup.center().y - px(360.0)).abs() <= px(1.0),
+            "the framework must center the popup: {popup:?}"
+        );
+        cx.simulate_click(popup.origin + point(px(24.0), px(24.0)), Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(app.modal.is_some(), "popup press must not dismiss")
+        });
+        cx.simulate_click(point(px(1.0), px(1.0)), Default::default());
         cx.run_until_parked();
         view.read_with(cx, |app, _| assert!(app.modal.is_none()));
         close_test_window(view, cx);

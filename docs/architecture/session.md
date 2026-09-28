@@ -117,3 +117,13 @@ committed receipts to the host even if the requested cancellation loses to earli
 
 The [input queue model](tla/input-queue/README.md) checks bounded protocol interleavings alongside
 Rust property and gated HTTP tests. The session/tool model retains its narrower tool boundary.
+
+## Conversation branches and fork
+
+The [conversation tree contract](conversation-tree.md) defines append-only head selection,
+atomic editing and independent Fork seeds. `SessionMachine` validates path contexts and
+requires quiescence, including an empty pending queue. A Fork seed is the child's first event;
+its normalized path evidence is validated before child metadata, journal and origin index
+commit together. The source head remains unchanged. SQLite schema 2, event format 4,
+search extractor 2 and machine semantics 2 fence incompatible readers. The bounded
+[conversation-tree model](tla/conversation-tree/README.md) checks this protocol.

@@ -83,6 +83,155 @@ pub(crate) fn start_input(agent: Agent, input_id: InputId, input: String) -> Act
     spawn(agent, Operation::Run(Some((input_id, input))))
 }
 
+pub(crate) fn edit_input(
+    agent: Agent,
+    id: InputId,
+    input: String,
+    target: InputId,
+    revision: u64,
+    head: Option<u64>,
+) -> ActiveAgent {
+    spawn(
+        agent,
+        Operation::Edit {
+            id,
+            input,
+            target,
+            revision,
+            head,
+        },
+    )
+}
+
+pub(crate) async fn select_conversation(
+    agent: Agent,
+    target: Option<u64>,
+    revision: u64,
+    head: Option<u64>,
+) -> (Agent, Vec<CommitReceipt>, Result<(), AgentError>) {
+    let (sink, mut receipts) = mpsc::unbounded_channel();
+    let mut owner = AgentLoop::new(agent);
+    let result = async {
+        owner.acquire_writer_and_reload(&sink).await?;
+        owner.check_conversation_revision(revision, head)?;
+        owner
+            .commit_now(
+                vec![SessionEvent::ConversationHeadSelected { head: target }],
+                &sink,
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    owner.agent.writer = None;
+    let mut committed = Vec::new();
+    while let Ok(AgentEvent::SessionCommitted(receipt)) = receipts.try_recv() {
+        committed.push(receipt);
+    }
+    (owner.into_agent(), committed, result)
+}
+
+pub(crate) async fn fork_session(
+    agent: Agent,
+    child: crate::SessionId,
+    anchor: u64,
+    target: Option<u64>,
+    revision: u64,
+    head: Option<u64>,
+) -> (
+    Agent,
+    Vec<CommitReceipt>,
+    Result<crate::Session, AgentError>,
+) {
+    let (sink, mut receipts) = mpsc::unbounded_channel();
+    let mut owner = AgentLoop::new(agent);
+    let result = async {
+        owner.acquire_writer_and_reload(&sink).await?;
+        owner.check_conversation_revision(revision, head)?;
+        let tree = owner.agent.machine.tree();
+        let valid = tree.node(anchor).is_some_and(|node| {
+            tree.path(head).contains(&anchor)
+                && node.settled
+                && node.completed
+                && node.safe
+                && match node.kind {
+                    crate::ConversationNodeKind::User(_) => target == node.parent,
+                    crate::ConversationNodeKind::Assistant(_) => target == Some(anchor),
+                    _ => false,
+                }
+        });
+        if !valid {
+            return Err(AgentError::Task(
+                "Choose a completed message on the current path".into(),
+            ));
+        }
+        let origin = crate::ForkOrigin {
+            session_id: owner.agent.info.id.clone(),
+            revision,
+            anchor,
+            head: target,
+            title: owner.agent.info.title.clone(),
+        };
+        let events = owner.agent.machine.fork_events(target)?;
+        let recorded = crate::RecordedEvent {
+            seq: 0,
+            tx_id: TxId::random(),
+            time: owner.agent.clock.now(),
+            event: SessionEvent::SessionForked { origin, events },
+        };
+        SessionMachine::from_events(std::slice::from_ref(&recorded))?;
+        let store = owner.agent.store.clone();
+        let writer = owner.agent.acquire_or_clone_writer().await?;
+        let source = owner.agent.info.id.clone();
+        let directory = owner
+            .agent
+            .info
+            .path
+            .parent()
+            .ok_or_else(|| AgentError::Task("Save the session before forking".into()))?
+            .to_owned();
+        let request = crate::session::store::CreateStoredSession {
+            id: child.clone(),
+            project_id: owner.agent.info.project_id.clone(),
+            title: owner.agent.info.title.clone(),
+            config: owner.agent.session_config.clone(),
+            created_at_ms: recorded.time.wall_time_ms,
+        };
+        tokio::task::spawn_blocking(move || -> Result<crate::Session, AgentError> {
+            let created = store.create_fork(
+                request.clone(),
+                &source,
+                revision,
+                recorded.clone(),
+                &writer,
+            );
+            if matches!(
+                created,
+                Err(crate::SessionStoreError::OutcomeUnknown { .. })
+            ) {
+                store.create_fork(request, &source, revision, recorded, &writer)?;
+            } else {
+                created?;
+            }
+            let loaded = store.load(&child)?;
+            Ok(crate::Session::from_loaded(
+                store,
+                loaded,
+                crate::session::locator(&directory, &child, false),
+            )?)
+        })
+        .await
+        .map_err(|error| AgentError::Task(error.to_string()))?
+    }
+    .await;
+    owner.agent.writer = None;
+    let mut committed = Vec::new();
+    while let Ok(AgentEvent::SessionCommitted(receipt)) = receipts.try_recv() {
+        committed.push(receipt);
+    }
+    (owner.into_agent(), committed, result)
+}
+
 pub(crate) fn resume_pending(agent: Agent) -> ActiveAgent {
     spawn(agent, Operation::Run(None))
 }
@@ -117,6 +266,13 @@ pub(crate) fn start_compaction(agent: Agent, instructions: Option<String>) -> Ac
 
 enum Operation {
     Run(Option<(InputId, String)>),
+    Edit {
+        id: InputId,
+        input: String,
+        target: InputId,
+        revision: u64,
+        head: Option<u64>,
+    },
     Compact(Option<String>),
     #[cfg(test)]
     Panic,
@@ -148,7 +304,18 @@ fn spawn(agent: Agent, operation: Operation) -> ActiveAgent {
                 return;
             }
             let result = match operation {
-                Operation::Run(input) => agent_loop.run(input, channels, &events_tx).await,
+                Operation::Run(input) => agent_loop.run(input, None, channels, &events_tx).await,
+                Operation::Edit {
+                    id,
+                    input,
+                    target,
+                    revision,
+                    head,
+                } => {
+                    agent_loop
+                        .run_edit(id, input, target, revision, head, channels, &events_tx)
+                        .await
+                }
                 Operation::Compact(instructions) => {
                     agent_loop
                         .run_manual_compaction(instructions.as_deref(), channels, &events_tx)
@@ -237,9 +404,51 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 }
 
 impl AgentLoop {
+    fn check_conversation_revision(
+        &self,
+        revision: u64,
+        head: Option<u64>,
+    ) -> Result<(), AgentError> {
+        self.agent.machine.require_quiescent()?;
+        if self.agent.revision != revision || self.agent.machine.tree().head() != head {
+            return Err(AgentError::Task(
+                "Conversation changed; reopen the message before editing".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_edit(
+        &mut self,
+        id: InputId,
+        input: String,
+        target: InputId,
+        revision: u64,
+        head: Option<u64>,
+        channels: RunChannels,
+        events: &EventSink,
+    ) -> Result<(), AgentError> {
+        self.check_conversation_revision(revision, head)?;
+        let tree = self.agent.machine.tree();
+        let node = tree
+            .input_node(&target)
+            .filter(|node| tree.path(head).contains(&node.id))
+            .ok_or_else(|| AgentError::Task("Message is not on the active branch".into()))?;
+        if input.trim().is_empty() || input == node.text {
+            return Err(AgentError::Task(
+                "Enter a changed, non-empty message".into(),
+            ));
+        }
+        let parent = node.parent;
+        self.run(Some((id, input)), Some(parent), channels, events)
+            .await
+    }
+
     async fn run(
         &mut self,
         input: Option<(InputId, String)>,
+        selected_head: Option<Option<u64>>,
         mut channels: RunChannels,
         events: &EventSink,
     ) -> Result<(), AgentError> {
@@ -248,6 +457,9 @@ impl AgentLoop {
             return Err(AgentError::Aborted);
         }
         let mut initial = Vec::new();
+        if let Some(head) = selected_head {
+            initial.push(SessionEvent::ConversationHeadSelected { head });
+        }
         let (input_id, input) = if let Some((input_id, input)) = input {
             if input.trim().is_empty() {
                 return Err(AgentError::EmptyInput);
@@ -2373,6 +2585,209 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn conversation_edit_fork_reopen_and_search_are_path_local() {
+        let directory = std::env::temp_dir().join(format!("kcastle-tree-{}", uuid::Uuid::new_v4()));
+        let session = Session::create(&directory).await.unwrap();
+        let (model, server) = text_stream_model("original-answer").await;
+        let mut agent = Agent::new(model, "test instructions", session, ".")
+            .start("original-question")
+            .finish()
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let original_head = agent.machine.tree().head();
+        let user = agent
+            .machine
+            .tree()
+            .nodes()
+            .find_map(|node| node.input_id().cloned())
+            .unwrap();
+        let original_events: Vec<_> = agent
+            .store
+            .load(&agent.info.id)
+            .unwrap()
+            .events()
+            .cloned()
+            .collect();
+        let revision = agent.session_revision();
+        // Failed admission leaves both history and head untouched, and never contacts a provider.
+        agent
+            .store
+            .inject_failpoint(AppendFailpoint::BeforeCommitOnce);
+        agent = agent
+            .edit_input(
+                InputId::random(),
+                "failed-edit".into(),
+                user.clone(),
+                revision,
+                original_head,
+            )
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(agent.machine.tree().head(), original_head);
+        assert_eq!(agent.session_revision(), revision);
+        let (model, server) = text_stream_model("edited-answer").await;
+        agent.set_model(model);
+        agent = agent
+            .edit_input(
+                InputId::random(),
+                "edited-question".into(),
+                user,
+                revision,
+                original_head,
+            )
+            .finish()
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let edited_head = agent.machine.tree().head();
+        assert!(agent.machine.tree().has_branches());
+        let edited_context = serde_json::to_string(&agent.machine.context()).unwrap();
+        assert!(edited_context.contains("edited-question"));
+        assert!(!edited_context.contains("original-question"));
+        let loaded = agent.store.load(&agent.info.id).unwrap();
+        let all: Vec<_> = loaded.events().cloned().collect();
+        assert_eq!(&all[..original_events.len()], original_events.as_slice());
+        let edit_tx = loaded
+            .transactions
+            .iter()
+            .find(|tx| {
+                tx.events
+                    .iter()
+                    .any(|e| matches!(e.event, SessionEvent::ConversationHeadSelected { .. }))
+            })
+            .unwrap();
+        assert!(
+            edit_tx
+                .events
+                .iter()
+                .any(|e| matches!(e.event, SessionEvent::InputAttached { .. }))
+        );
+        let catalog = Session::catalog(&directory).unwrap();
+        let search = format!("{:?}", catalog.search_values);
+        assert!(search.contains("edited-question"));
+        assert!(!search.contains("original-question"));
+        let child_id = crate::SessionId::new();
+        let revision = agent.session_revision();
+        agent
+            .store
+            .inject_failpoint(AppendFailpoint::BeforeCommitOnce);
+        let (returned, _, result) = agent
+            .fork_session(
+                child_id.clone(),
+                edited_head.unwrap(),
+                edited_head,
+                revision,
+                edited_head,
+            )
+            .await;
+        agent = returned;
+        assert!(result.is_err());
+        assert!(
+            Session::fork_children(&directory, &agent.info.id)
+                .unwrap()
+                .is_empty()
+        );
+        agent
+            .store
+            .inject_failpoint(AppendFailpoint::AfterCommitBeforeReceiptOnce);
+        let (returned, _, result) = agent
+            .fork_session(
+                child_id.clone(),
+                edited_head.unwrap(),
+                edited_head,
+                revision,
+                edited_head,
+            )
+            .await;
+        agent = returned;
+        let child = result.unwrap();
+        assert_eq!(child.info().title, format!("{} (1)", agent.info.title));
+        assert_eq!(
+            SessionMachine::from_events(child.events())
+                .unwrap()
+                .context(),
+            agent.machine.context()
+        );
+        let child_path = child.info().path.clone();
+        let (returned, _, repeated) = agent
+            .fork_session(
+                child_id,
+                edited_head.unwrap(),
+                edited_head,
+                revision,
+                edited_head,
+            )
+            .await;
+        agent = returned;
+        assert_eq!(repeated.unwrap().info().path, child_path);
+        assert_eq!(
+            Session::fork_children(&directory, &agent.info.id)
+                .unwrap()
+                .len(),
+            1
+        );
+        Session::archive(child.info()).unwrap();
+        let (returned, _, sibling) = agent
+            .fork_session(
+                crate::SessionId::new(),
+                edited_head.unwrap(),
+                edited_head,
+                revision,
+                edited_head,
+            )
+            .await;
+        agent = returned;
+        assert_eq!(
+            sibling.unwrap().info().title,
+            format!("{} (2)", agent.info.title)
+        );
+        assert_eq!(agent.machine.tree().head(), edited_head);
+        let (returned, _, selected) = agent
+            .select_conversation(original_head, revision, edited_head)
+            .await;
+        agent = returned;
+        selected.unwrap();
+        assert!(
+            serde_json::to_string(&agent.machine.context())
+                .unwrap()
+                .contains("original-question")
+        );
+        let reopened = Session::open(&agent.info.path).await.unwrap();
+        assert_eq!(
+            SessionMachine::from_events(reopened.events())
+                .unwrap()
+                .tree()
+                .head(),
+            original_head
+        );
+        assert_eq!(
+            SessionMachine::from_events(reopened.events())
+                .unwrap()
+                .context(),
+            agent.machine.context()
+        );
+        let source_info = agent.info.clone();
+        drop(agent);
+        drop(reopened);
+        Session::delete(&source_info).unwrap();
+        let independent = Session::open(&child_path).await.unwrap();
+        assert_eq!(
+            serde_json::to_string(
+                &SessionMachine::from_events(independent.events())
+                    .unwrap()
+                    .context()
+            )
+            .unwrap(),
+            edited_context
+        );
+        drop(independent);
+        drop(child);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

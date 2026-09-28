@@ -10,6 +10,9 @@ use kcastle_agent::{
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SessionDocument {
+    pub(crate) tree: kcastle_agent::ConversationTree,
+    inherited_stats: SessionStats,
+    inherited_items: HashSet<ConversationItemId>,
     cursor: EventCursor,
     events: Vec<RecordedEvent>,
     graph: ExecutionGraph,
@@ -390,6 +393,32 @@ pub(crate) struct SessionStats {
 }
 
 impl SessionStats {
+    fn without(self, inherited: Self) -> Self {
+        Self {
+            turns: self.turns.saturating_sub(inherited.turns),
+            steps: self.steps.saturating_sub(inherited.steps),
+            llm_ns: self.llm_ns.saturating_sub(inherited.llm_ns),
+            tool_ns: self.tool_ns.saturating_sub(inherited.tool_ns),
+            ttft_ns: self.ttft_ns.saturating_sub(inherited.ttft_ns),
+            ttft_samples: self.ttft_samples.saturating_sub(inherited.ttft_samples),
+            decode_ns: self.decode_ns.saturating_sub(inherited.decode_ns),
+            decode_tokens: self.decode_tokens.saturating_sub(inherited.decode_tokens),
+            uncached_input_tokens: self
+                .uncached_input_tokens
+                .saturating_sub(inherited.uncached_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .saturating_sub(inherited.cache_read_input_tokens),
+            cache_write_input_tokens: self
+                .cache_write_input_tokens
+                .saturating_sub(inherited.cache_write_input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(inherited.output_tokens),
+            reasoning_output_tokens: self
+                .reasoning_output_tokens
+                .saturating_sub(inherited.reasoning_output_tokens),
+        }
+    }
+
     pub(crate) fn input_tokens(self) -> u64 {
         self.uncached_input_tokens
             .saturating_add(self.cache_read_input_tokens)
@@ -663,7 +692,40 @@ impl SessionDocument {
     }
 
     pub(crate) fn stats(&self) -> SessionStats {
-        self.stats
+        self.stats.without(self.inherited_stats)
+    }
+
+    pub(crate) fn inherited_message_count(&self) -> usize {
+        self.conversation_order
+            .iter()
+            .take_while(|id| self.inherited_items.contains(*id))
+            .count()
+    }
+
+    pub(crate) fn selected_path(&self, head: Option<u64>) -> Result<Self, ProjectionError> {
+        let mut events = self.tree.path_events(head);
+        // Pending inputs have no tree node yet, but later attachment receipts need them.
+        // Keep this session's inbox in the display projection, not in fork evidence.
+        let pending = self.pending_inputs.iter().collect::<HashSet<_>>();
+        events.extend(
+            self.events
+                .iter()
+                .filter(|record| match &record.event {
+                    SessionEvent::InputSubmitted { input_id, .. }
+                    | SessionEvent::InputPrioritized { input_id } => pending.contains(input_id),
+                    _ => false,
+                })
+                .cloned(),
+        );
+        for (seq, event) in events.iter_mut().enumerate() {
+            event.seq = seq as u64;
+        }
+        let mut selected = Self::from_events(events)?;
+        selected.cursor = self.cursor;
+        selected.inherited_items = self.inherited_items.clone();
+        // Path history includes inherited usage; the runtime publishes actual session spending separately.
+        selected.inherited_stats = SessionStats::default();
+        Ok(selected)
     }
 
     pub(crate) fn revisions(&self) -> ProjectionRevisions {
@@ -705,6 +767,7 @@ impl SessionDocument {
                 &mut changed_trajectory,
                 &mut changed_requests,
             );
+            self.tree.observe(&recorded);
             self.events.push(recorded);
             self.cursor.next_seq = self.cursor.next_seq.saturating_add(1);
             self.revisions.document = self.revisions.document.saturating_add(1);
@@ -894,6 +957,22 @@ impl SessionDocument {
         let seq = recorded.seq;
         let time = &recorded.time;
         match &recorded.event {
+            SessionEvent::ConversationHeadSelected { .. } => {}
+            SessionEvent::SessionForked { events, .. } => {
+                let mut imported = Self::from_events(events.clone())
+                    .expect("fork evidence was validated by SessionMachine");
+                imported.inherited_stats = imported.stats;
+                imported.inherited_items = imported.conversation_order.iter().cloned().collect();
+                imported.cursor = self.cursor;
+                imported.events = std::mem::take(&mut self.events);
+                imported.tree = std::mem::take(&mut self.tree);
+                *self = imported;
+                changes.conversation_order.reorder();
+                changes.trajectory_order.reorder();
+                changes.request_order.reorder();
+                changes.geometry = true;
+                changes.stats = true;
+            }
             SessionEvent::RunStarted { .. }
             | SessionEvent::RunTerminated { .. }
             | SessionEvent::TurnStarted { .. } => {}
@@ -2555,6 +2634,182 @@ pub(crate) mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn conversation_stats_keep_spending_when_selecting_and_exclude_fork_imports() {
+        let events = fixture();
+        let mut document = SessionDocument::from_events(events.clone()).unwrap();
+        let spending = document.stats();
+        assert!(spending.input_tokens() > 0);
+        let head = document.tree.head();
+        let user = document
+            .tree
+            .nodes()
+            .find(|node| node.input_id().is_some())
+            .unwrap()
+            .id;
+        document
+            .apply_batch(vec![recorded(
+                events.len() as u64,
+                SessionEvent::ConversationHeadSelected { head: Some(user) },
+            )])
+            .unwrap();
+        assert_eq!(document.stats(), spending);
+        assert_eq!(
+            document
+                .selected_path(Some(user))
+                .unwrap()
+                .stats()
+                .input_tokens(),
+            0
+        );
+        assert_eq!(
+            document.selected_path(head).unwrap().stats().input_tokens(),
+            spending.input_tokens()
+        );
+        let child = SessionDocument::from_events(vec![recorded(
+            0,
+            SessionEvent::SessionForked {
+                origin: kcastle_agent::ForkOrigin {
+                    session_id: kcastle_agent::SessionId::new(),
+                    revision: 1,
+                    anchor: user,
+                    head,
+                    title: "parent".into(),
+                },
+                events,
+            },
+        )])
+        .unwrap();
+        assert_eq!(child.stats(), SessionStats::default());
+        assert_eq!(
+            child
+                .selected_path(child.tree.head())
+                .unwrap()
+                .stats()
+                .input_tokens(),
+            spending.input_tokens()
+        );
+        assert!(child.tree.nodes().all(|node| node.inherited));
+        assert_eq!(
+            child.inherited_message_count(),
+            child.conversation_ids().len()
+        );
+        let path = child.selected_path(child.tree.head()).unwrap();
+        assert_eq!(
+            path.inherited_message_count(),
+            path.conversation_ids().len()
+        );
+        let shortened = child.selected_path(Some(user)).unwrap();
+        assert_eq!(shortened.inherited_message_count(), 1);
+        assert_eq!(
+            child.selected_path(None).unwrap().inherited_message_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn reopened_selected_path_preserves_pending_inputs() {
+        for forked in [false, true] {
+            let history = fixture();
+            let original = SessionDocument::from_events(history.clone()).unwrap();
+            let head = original.tree.head();
+            let mut events = if forked {
+                vec![recorded(
+                    0,
+                    SessionEvent::SessionForked {
+                        origin: kcastle_agent::ForkOrigin {
+                            session_id: kcastle_agent::SessionId::new(),
+                            revision: 1,
+                            anchor: head.unwrap(),
+                            head,
+                            title: "parent".into(),
+                        },
+                        events: history,
+                    },
+                )]
+            } else {
+                let mut events = history;
+                let user = original
+                    .tree
+                    .nodes()
+                    .find(|node| node.input_id().is_some())
+                    .unwrap()
+                    .id;
+                events.push(recorded(
+                    events.len() as u64,
+                    SessionEvent::ConversationHeadSelected { head: Some(user) },
+                ));
+                events
+            };
+            for event in [
+                SessionEvent::InputSubmitted {
+                    input_id: "cancelled".into(),
+                    input: "cancel me".into(),
+                    origin: InputOrigin::Queue,
+                },
+                SessionEvent::InputCancelled {
+                    input_id: "cancelled".into(),
+                },
+                SessionEvent::InputSubmitted {
+                    input_id: "pending".into(),
+                    input: "queued before restart".into(),
+                    origin: InputOrigin::Queue,
+                },
+                SessionEvent::InputPrioritized {
+                    input_id: "pending".into(),
+                },
+            ] {
+                events.push(recorded(events.len() as u64, event));
+            }
+            kcastle_agent::validate_events(&events).unwrap();
+            let document = SessionDocument::from_events(events.clone()).unwrap();
+            let mut selected = document.selected_path(document.tree.head()).unwrap();
+            assert_eq!(selected.pending_inputs(), document.pending_inputs());
+            assert!(
+                !selected
+                    .graph
+                    .inputs
+                    .contains_key(&InputId::from("cancelled"))
+            );
+            let next_seq = events.len() as u64;
+            let delta = vec![
+                SessionEvent::RunStarted {
+                    run_id: "resumed-run".into(),
+                },
+                SessionEvent::TurnStarted {
+                    run_id: "resumed-run".into(),
+                    turn_id: "resumed-turn".into(),
+                },
+                SessionEvent::StepStarted {
+                    turn_id: "resumed-turn".into(),
+                    step_id: "resumed-step".into(),
+                },
+                SessionEvent::InputAttached {
+                    input_id: "pending".into(),
+                    step_id: "resumed-step".into(),
+                    items: vec![EasyInputMessage::from("queued before restart").into()],
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(offset, event)| {
+                let mut event = recorded(next_seq + offset as u64, event);
+                event.tx_id = "resume".into();
+                event
+            })
+            .collect::<Vec<_>>();
+            events.extend(delta.clone());
+            kcastle_agent::validate_events(&events).unwrap();
+            selected.apply_batch(delta).unwrap();
+            assert!(selected.pending_inputs().is_empty());
+            assert_eq!(
+                selected.graph.inputs[&InputId::from("pending")].text,
+                "queued before restart"
+            );
+            assert!(selected.graph.inputs[&InputId::from("pending")].attached);
+        }
+    }
 
     fn id<T: From<&'static str>>(value: &'static str) -> T {
         value.into()

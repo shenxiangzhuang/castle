@@ -213,6 +213,45 @@ impl Agent {
         agent_loop::start_input(self, input_id, input)
     }
 
+    pub fn can_change_conversation(&self) -> bool {
+        !self.info.is_archived() && self.machine.require_quiescent().is_ok()
+    }
+
+    pub fn conversation_tree(&self) -> &crate::ConversationTree {
+        self.machine.tree()
+    }
+
+    pub fn edit_input(
+        self,
+        input_id: crate::InputId,
+        input: String,
+        target: crate::InputId,
+        revision: u64,
+        head: Option<u64>,
+    ) -> ActiveAgent {
+        agent_loop::edit_input(self, input_id, input, target, revision, head)
+    }
+
+    pub async fn select_conversation(
+        self,
+        target: Option<u64>,
+        revision: u64,
+        head: Option<u64>,
+    ) -> (Self, Vec<crate::CommitReceipt>, Result<(), AgentError>) {
+        agent_loop::select_conversation(self, target, revision, head).await
+    }
+
+    pub async fn fork_session(
+        self,
+        child: crate::SessionId,
+        anchor: u64,
+        target: Option<u64>,
+        revision: u64,
+        head: Option<u64>,
+    ) -> (Self, Vec<crate::CommitReceipt>, Result<Session, AgentError>) {
+        agent_loop::fork_session(self, child, anchor, target, revision, head).await
+    }
+
     pub fn resume_pending(self) -> ActiveAgent {
         agent_loop::resume_pending(self)
     }

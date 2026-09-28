@@ -1,3 +1,6 @@
+mod conversation_tree;
+mod session_relations;
+use conversation_tree::EditDraft;
 #[cfg(test)]
 use gpui_kit::ScrollWheelEvent;
 use std::cell::{Cell, RefCell};
@@ -234,6 +237,12 @@ pub(crate) struct DesktopApp {
     pub(crate) input: Entity<TextareaState>,
     pub(crate) composer_submitting: bool,
     composer_edit_revision: u64,
+    pub(crate) edit_draft: Option<EditDraft>,
+    pub(crate) relations_hovered: bool,
+    pub(crate) relations_open: bool,
+    composer_drafts: HashMap<SessionId, (String, Option<EditDraft>)>,
+    composer_restore: Option<(String, String)>,
+    pending_fork_refresh: bool,
     pub(crate) session_search: Entity<InputState>,
     pub(crate) trajectory_search: Entity<InputState>,
     trajectory_query_value: String,
@@ -459,6 +468,12 @@ impl DesktopApp {
             input,
             composer_submitting: false,
             composer_edit_revision: 0,
+            edit_draft: None,
+            relations_hovered: false,
+            relations_open: false,
+            composer_drafts: HashMap::new(),
+            composer_restore: None,
+            pending_fork_refresh: false,
             session_search,
             trajectory_search,
             trajectory_query_value: String::new(),
@@ -955,6 +970,23 @@ impl DesktopApp {
     fn select_runtime(&mut self, runtime: Entity<SessionRuntime>, cx: &mut Context<Self>) {
         let changing_session = runtime.entity_id() != self.selected_runtime.entity_id();
         if changing_session {
+            self.relations_hovered = false;
+            self.relations_open = false;
+            let current = self.selected_runtime.read(cx).snapshot().session.id;
+            let current_text = self.input.read(cx).value().to_string();
+            let text = self
+                .composer_restore
+                .take()
+                .filter(|(_, displaced)| *displaced == current_text)
+                .map_or_else(|| current_text.clone(), |(text, _)| text);
+            self.composer_drafts
+                .insert(current, (text, self.edit_draft.take()));
+            let (text, edit) = self
+                .composer_drafts
+                .remove(&runtime.read(cx).snapshot().session.id)
+                .unwrap_or_default();
+            self.composer_restore = Some((text, current_text));
+            self.edit_draft = edit;
             // A session load is asynchronous, so the user may keep changing search, tabs, tail
             // following, or scroll positions after the click that started it. Capture once more
             // at the atomic handoff; the earlier eager capture remains useful for a failed load,
@@ -1282,6 +1314,7 @@ impl DesktopApp {
     }
 
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_composer_restore(window, cx);
         if self.selection_pending() || self.composer_submitting {
             return;
         }
@@ -1294,8 +1327,27 @@ impl DesktopApp {
             return;
         }
         let runtime = self.selected_runtime.clone();
-        let Some(accepted) = runtime.update(cx, |runtime, cx| runtime.submit(value, window, cx))
-        else {
+        let edit = self.edit_draft.clone();
+        if edit
+            .as_ref()
+            .is_some_and(|edit| edit.original.trim() == value)
+        {
+            return;
+        }
+        let Some(accepted) = runtime.update(cx, |runtime, cx| {
+            if let Some(edit) = &edit {
+                runtime.submit_edit(
+                    value,
+                    edit.target.clone(),
+                    edit.revision,
+                    edit.head,
+                    window,
+                    cx,
+                )
+            } else {
+                runtime.submit(value, window, cx)
+            }
+        }) else {
             return;
         };
         let revision = self.composer_edit_revision;
@@ -1310,16 +1362,29 @@ impl DesktopApp {
                 this.update(app, |this, cx| {
                     this.composer_submitting = false;
                     if this.selected_runtime != runtime {
+                        if result.is_ok() {
+                            let id = runtime.read(cx).snapshot().session.id;
+                            if let Some((text, stored_edit)) = this.composer_drafts.get_mut(&id) {
+                                if *text == original {
+                                    *text = edit.map_or_else(String::new, |edit| edit.saved);
+                                }
+                                *stored_edit = None;
+                            }
+                        }
                         cx.notify();
                         return;
                     }
                     match result {
                         Ok(()) => {
+                            let saved = this
+                                .edit_draft
+                                .take()
+                                .map_or_else(String::new, |edit| edit.saved);
                             if this.composer_edit_revision == revision
                                 && this.input.read(cx).value().as_str() == original
                             {
                                 this.input.update(cx, |input, cx| {
-                                    input.set_value("", window, cx);
+                                    input.set_value(saved, window, cx);
                                     input.set_placeholder("Message the agent", window, cx);
                                 });
                             }
@@ -1782,6 +1847,10 @@ impl DesktopApp {
             return;
         }
         if event.keystroke.key == "escape" {
+            if self.edit_draft.is_some() {
+                self.cancel_edit(window, cx);
+                return;
+            }
             self.dismiss_transient(window, cx);
         }
     }
@@ -2343,16 +2412,21 @@ impl DesktopApp {
         project_index: usize,
         session: SessionInfo,
         cx: &mut Context<Self>,
-    ) {
-        match Session::restore(&session) {
-            Ok(_) => {
+    ) -> Option<SessionInfo> {
+        let restored = match Session::restore(&session) {
+            Ok(restored) => {
                 self.reload_archived_sessions(project_index);
                 self.reload_project_session_list(project_index);
                 self.notice(format!("Restored “{}”", session.title));
+                Some(restored)
             }
-            Err(error) => self.notice(format!("Could not restore session: {error}")),
-        }
+            Err(error) => {
+                self.notice(format!("Could not restore session: {error}"));
+                None
+            }
+        };
         cx.notify();
+        restored
     }
 
     pub(crate) fn delete_archived_session(
@@ -2566,7 +2640,7 @@ impl DesktopApp {
     }
 
     fn upsert_runtime_session_metadata(&mut self, project_id: &ProjectId, session: &SessionInfo) {
-        if session.path.as_os_str().is_empty() {
+        if session.path.as_os_str().is_empty() || session.is_archived() {
             return;
         }
         let Some(project) = self
@@ -2618,6 +2692,7 @@ impl DesktopApp {
         else {
             return false;
         };
+        self.pending_fork_refresh = true;
         apply_project_catalog_result(
             &project.id,
             &project.sessions_dir,
@@ -2799,6 +2874,504 @@ mod tests {
             weak_view.upgrade().is_none(),
             "closing the test window must release its app and session database handles"
         );
+    }
+
+    #[gpui_kit::test]
+    fn fork_completion_keeps_project_identity_after_removal(cx: &mut gpui_kit::TestAppContext) {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
+        cx.background_executor.allow_parking();
+        let root = std::env::temp_dir().join(format!("kcastle-fork-project-{}", SessionId::new()));
+        let (mut project_store, _) = ProjectStore::load(root.join("state"), None).unwrap();
+        let mut indices = Vec::new();
+        for name in ["before", "source", "after"] {
+            let path = root.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            indices.push(project_store.add(path).unwrap());
+        }
+        let project = project_store.project(indices[1]).unwrap().clone();
+        let after = project_store.project(indices[2]).unwrap().clone();
+        let info = create_v2_session(
+            &project.sessions_dir,
+            project.id.as_str(),
+            SessionId::new(),
+            Some("Source"),
+        );
+        commit_external_turn(
+            &info.path,
+            project.id.as_str(),
+            "Question",
+            "Completed reply",
+        );
+        let model = Model::new("test", "key", "http://127.0.0.1:1", "test-model", 10_000);
+        let agent = Agent::new(
+            model.clone(),
+            "test",
+            Session::memory(),
+            project.path.clone(),
+        );
+        let configured = ConfiguredModel::new(
+            "test",
+            ProviderModel::new("test-model", "Test", 10_000, None),
+            model,
+        );
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project: indices[1],
+                    settings,
+                },
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                let session =
+                    Session::open_writable_in_project(&info.path, project.id.as_str()).unwrap();
+                let runtime = app.create_runtime(indices[1], session, cx).unwrap();
+                app.select_runtime(runtime, cx);
+                let key = app
+                    .core
+                    .session_view
+                    .conversation
+                    .messages
+                    .iter()
+                    .find(|message| message.role == Role::Assistant)
+                    .unwrap()
+                    .key;
+                assert!(app.can_fork_message(key, cx));
+                app.fork_message(key, window, cx);
+                // Mutation happens before the fork future can publish its result on the UI thread.
+                app.remove_project(indices[0], window, cx);
+                assert_eq!(app.project_store.project(indices[1]).unwrap().id, after.id);
+            })
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            cx.run_until_parked();
+            if view.read_with(cx, |app, cx| {
+                app.project_runtimes.values().any(|project| {
+                    project
+                        .sessions
+                        .values()
+                        .any(|runtime| runtime.read(cx).tree().origin.is_some())
+                })
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fork completion was not published"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        view.read_with(cx, |app, cx| {
+            let child = app.project_runtimes[&project.id]
+                .sessions
+                .values()
+                .find(|runtime| runtime.read(cx).tree().origin.is_some())
+                .expect("fork must stay in its source project");
+            assert_eq!(
+                child.read(cx).snapshot().session.project_id,
+                project.id.as_str()
+            );
+            assert!(app.project_runtimes.get(&after.id).is_none_or(|project| {
+                project
+                    .sessions
+                    .values()
+                    .all(|runtime| runtime.read(cx).tree().origin.is_none())
+            }));
+            assert_eq!(
+                app.selected_runtime.read(cx).snapshot().session.id,
+                info.id,
+                "stale completion must not steal selection"
+            );
+        });
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn conversation_edit_fork_relations_and_drafts_render(cx: &mut gpui_kit::TestAppContext) {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
+        cx.background_executor.allow_parking();
+        let root = std::env::temp_dir().join(format!("kcastle-tree-ui-{}", SessionId::new()));
+        let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        // A deterministic connection refusal settles each admitted message without external IO.
+        let model = Model::new("test", "key", "http://127.0.0.1:1", "test-model", 10_000);
+        startup.models = vec![ConfiguredModel::new(
+            "test",
+            ProviderModel::new("test-model", "Test", 10_000, None),
+            model.clone(),
+        )];
+        startup.selected_model = 0;
+        startup.agent.set_model(model);
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        cx.simulate_resize(gpui_kit::size(px(1180.0), px(720.0)));
+        let settle = |view: &Entity<DesktopApp>, cx: &mut gpui_kit::VisualTestContext| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                cx.run_until_parked();
+                if !view.read_with(cx, |app, cx| {
+                    app.composer_submitting || app.selected_runtime.read(cx).is_active()
+                }) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "runtime did not settle");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.input.update(cx, |input, cx| {
+                    input.set_value("original message", window, cx)
+                });
+                app.submit(window, cx);
+            })
+        });
+        settle(&view, cx);
+        assert!(cx.debug_bounds("conversation-branches").is_none());
+        let (source, key, _old_head) = view.read_with(cx, |app, cx| {
+            let key = app
+                .core
+                .session_view
+                .conversation
+                .messages
+                .iter()
+                .find(|m| m.role == Role::User)
+                .unwrap()
+                .key;
+            (
+                app.selected_runtime.clone(),
+                key,
+                app.selected_runtime.read(cx).tree().head(),
+            )
+        });
+        let (reply_model, reply_server) = text_stream_model("Completed reply");
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                assert!(
+                    !app.can_fork_message(key, cx),
+                    "user messages only expose editing"
+                );
+                app.models[0].model = reply_model;
+                app.selected_runtime
+                    .update(cx, |runtime, cx| runtime.refresh_model(&app.models[0], cx));
+                app.input.update(cx, |input, cx| {
+                    input.set_value("ordinary draft", window, cx)
+                });
+                app.edit_message(key, window, cx);
+                assert_eq!(app.input.read(cx).value().as_str(), "original message");
+                app.cancel_edit(window, cx);
+                assert_eq!(app.input.read(cx).value().as_str(), "ordinary draft");
+                app.edit_message(key, window, cx);
+                app.input.update(cx, |input, cx| {
+                    input.set_value("edited message", window, cx)
+                });
+                app.submit(window, cx);
+            })
+        });
+        settle(&view, cx);
+        reply_server.join().unwrap();
+        assert!(cx.debug_bounds("edit-user-message").is_some());
+        assert!(cx.debug_bounds("fork-assistant-message").is_some());
+        assert!(
+            cx.debug_bounds("conversation-branches").is_none(),
+            "local edits must not show tree navigation"
+        );
+        let new_head = view.read_with(cx, |app, cx| {
+            assert!(app.edit_draft.is_none());
+            assert_eq!(app.input.read(cx).value().as_str(), "ordinary draft");
+            assert!(app.selected_runtime.read(cx).tree().has_branches());
+            app.selected_runtime.read(cx).tree().head()
+        });
+        assert!(cx.debug_bounds("session-relations").is_none());
+        assert!(cx.debug_bounds("conversation-tree-panel").is_none());
+        let key = view.read_with(cx, |app, _| {
+            app.core
+                .session_view
+                .conversation
+                .messages
+                .iter()
+                .find(|m| m.role == Role::Assistant)
+                .unwrap()
+                .key
+        });
+        cx.update(|window, cx| view.update(cx, |app, cx| app.fork_message(key, window, cx)));
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while view.read_with(cx, |app, _| app.selected_runtime == source) {
+            assert!(Instant::now() < deadline);
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        settle(&view, cx);
+        assert!(cx.debug_bounds("fork-origin").is_none());
+        assert!(
+            cx.debug_bounds("session-relations").is_some(),
+            "forked child shows its relationship icon"
+        );
+        let (child_path, source_id, child_id) = view.read_with(cx, |app, cx| {
+            assert_eq!(app.input.read(cx).value().as_str(), "");
+            assert_eq!(
+                app.core
+                    .session_view
+                    .conversation
+                    .messages
+                    .back()
+                    .unwrap()
+                    .text,
+                "Completed reply"
+            );
+            assert!(app.selected_runtime.read(cx).tree().origin.is_some());
+            assert_eq!(app.core.session_view.actual_stats.input_tokens(), 0);
+            assert_eq!(
+                app.selected_runtime.read(cx).snapshot().session.title,
+                format!("{} (1)", source.read(cx).snapshot().session.title)
+            );
+            (
+                app.core.session.current.clone(),
+                source.read(cx).snapshot().session.id.to_string(),
+                app.selected_runtime
+                    .read(cx)
+                    .snapshot()
+                    .session
+                    .id
+                    .to_string(),
+            )
+        });
+        assert!(
+            cx.debug_bounds("continued-from-chat").is_some(),
+            "fork must expose its continuation link"
+        );
+        // Hover opens a clickable list; moving into it must not dismiss it.
+        let icon = cx.debug_bounds("session-relations").unwrap();
+        assert!(
+            icon.size.width <= px(24.0),
+            "relationship icon must stay compact"
+        );
+        cx.simulate_mouse_move(icon.center(), None, Default::default());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(650));
+        cx.run_until_parked();
+        let parent = cx
+            .debug_bounds(format!("relation-Parents-{source_id}").leak())
+            .unwrap();
+        let list = cx.debug_bounds("session-relations-list").unwrap();
+        assert!(
+            list.size.width <= px(200.0) && list.size.height <= px(64.0),
+            "one link needs a compact menu: {list:?}"
+        );
+        let title = cx
+            .debug_bounds(format!("relation-title-Parents-{source_id}").leak())
+            .unwrap();
+        assert!(
+            (title.left() - parent.left() - px(8.0)).abs() <= px(1.0),
+            "session title must align with the row's leading padding"
+        );
+        assert!(parent.size.height <= px(28.0));
+        let age = cx
+            .debug_bounds(format!("relation-age-Parents-{source_id}").leak())
+            .unwrap();
+        assert!(
+            title.right() < age.left(),
+            "time must not overlap the title"
+        );
+        assert!((parent.right() - age.right() - px(8.0)).abs() <= px(1.0));
+
+        assert!(
+            cx.update(|window, _| window
+                .painted_quads()
+                .iter()
+                .any(|quad| quad.bounds == list.scale(window.scale_factor()))),
+            "compact popup surface must be painted"
+        );
+        cx.simulate_mouse_move(parent.center(), None, Default::default());
+        cx.run_until_parked();
+        let continuation = cx.debug_bounds("continued-from-chat").unwrap();
+        cx.simulate_click(continuation.center(), Default::default());
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while view.read_with(cx, |app, _| {
+            app.core.session.current == child_path || app.selection_pending()
+        }) {
+            assert!(Instant::now() < deadline);
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        settle(&view, cx);
+        view.read_with(cx, |app, cx| {
+            assert_eq!(app.input.read(cx).value().as_str(), "ordinary draft");
+            assert_eq!(app.selected_runtime.read(cx).tree().head(), new_head);
+            assert!(
+                app.core
+                    .session_view
+                    .conversation
+                    .messages
+                    .iter()
+                    .any(|m| m.text == "edited message")
+            );
+        });
+        // Click also opens the same list, providing a keyboard-accessible alternative.
+        let icon = cx.debug_bounds("session-relations").unwrap();
+        cx.simulate_click(icon.center(), Default::default());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(format!("relation-Children-{child_id}").leak())
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds(format!("relation-age-Children-{child_id}").leak())
+                .is_some()
+        );
+        let clicked_list = cx.debug_bounds("session-relations-list").unwrap();
+        assert_eq!(
+            clicked_list.size, list.size,
+            "hover and click must use identical compact surfaces"
+        );
+        assert!(cx.debug_bounds("conversation-tree-panel").is_none());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let source_path = view.read_with(cx, |app, _| app.core.session.current.clone());
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.archive_target_session(
+                    app.core.workspace.active_project,
+                    child_path.clone(),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("session-relations").is_some(),
+            "archived children must retain their relationship icon"
+        );
+        let icon = cx.debug_bounds("session-relations").unwrap();
+        cx.simulate_click(icon.center(), Default::default());
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds(format!("relation-Children-{child_id}").leak())
+            .unwrap();
+        assert!(
+            cx.debug_bounds(format!("relation-age-Children-{child_id}").leak())
+                .is_some()
+        );
+        cx.simulate_click(row.center(), Default::default());
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while view.read_with(cx, |app, cx| {
+            app.selection_pending()
+                || !app
+                    .selected_runtime
+                    .read(cx)
+                    .snapshot()
+                    .session
+                    .is_archived()
+        }) {
+            assert!(Instant::now() < deadline);
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("archived-session").is_some());
+        assert!(cx.debug_bounds("continued-from-chat").is_none());
+        view.read_with(cx, |app, cx| {
+            assert!(!app.selected_runtime.read(cx).can_branch());
+            assert!(
+                app.project_sessions
+                    .values()
+                    .flatten()
+                    .all(|s| s.id.to_string() != child_id)
+            );
+            assert!(
+                app.project_archived_sessions
+                    .values()
+                    .flatten()
+                    .any(|s| s.id.to_string() == child_id)
+            );
+        });
+        let restore = cx.debug_bounds("unarchive-and-open").unwrap();
+        assert!(f32::from(restore.size.width) < 220.0);
+        assert_eq!(restore.size.height, px(32.0));
+        assert!(
+            cx.update(|window, cx| {
+                let background: gpui_kit::Background = crate::ui_theme::palette(cx).text.into();
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds == restore.scale(window.scale_factor())
+                        && quad.background == background
+                })
+            }),
+            "restore action must have an opaque contrasting background"
+        );
+        cx.simulate_click(restore.center(), Default::default());
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while view.read_with(cx, |app, _| {
+            app.core.session.current != child_path || app.selection_pending()
+        }) {
+            assert!(Instant::now() < deadline);
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        settle(&view, cx);
+        assert!(cx.debug_bounds("archived-session").is_none());
+        assert!(cx.debug_bounds("continued-from-chat").is_some());
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.archive_target_session(
+                    app.core.workspace.active_project,
+                    source_path,
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("session-relations").is_some(),
+            "archived parents must retain their relationship icon"
+        );
+        assert!(cx.debug_bounds("continued-from-chat").is_some());
+        let continuation = cx.debug_bounds("continued-from-chat").unwrap();
+        cx.simulate_click(continuation.center(), Default::default());
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while view.read_with(cx, |app, cx| {
+            app.selection_pending()
+                || !app
+                    .selected_runtime
+                    .read(cx)
+                    .snapshot()
+                    .session
+                    .is_archived()
+        }) {
+            assert!(Instant::now() < deadline);
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("archived-session").is_some());
+        view.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.selected_runtime
+                    .read(cx)
+                    .snapshot()
+                    .session
+                    .id
+                    .to_string(),
+                source_id
+            );
+        });
+        drop(source);
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui_kit::test]

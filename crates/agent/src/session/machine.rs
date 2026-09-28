@@ -21,7 +21,7 @@ use crate::session::event::{
 
 /// Increment when an existing serialized event sequence can no longer be interpreted with the
 /// same validity and state-transition semantics.
-pub(crate) const SESSION_MACHINE_SEMANTICS_VERSION: u32 = 1;
+pub(crate) const SESSION_MACHINE_SEMANTICS_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingInput {
@@ -160,6 +160,8 @@ struct CompactionRecord {
 pub struct SessionMachine {
     next_seq: u64,
     state: ContextState,
+    tree: super::tree::ConversationTree,
+    contexts: OrdMap<u64, ContextState>,
     inputs: HashMap<InputId, InputRecord>,
     next_input_ordinal: u64,
     pending_input_ordinals: HashMap<InputId, u64>,
@@ -191,6 +193,8 @@ impl Default for SessionMachine {
         Self {
             next_seq: 0,
             state: ContextState::default(),
+            tree: super::tree::ConversationTree::default(),
+            contexts: OrdMap::new(),
             inputs: HashMap::new(),
             next_input_ordinal: 0,
             pending_input_ordinals: HashMap::new(),
@@ -242,6 +246,92 @@ impl SessionMachine {
 
     pub fn state(&self) -> &ContextState {
         &self.state
+    }
+
+    pub fn tree(&self) -> &super::tree::ConversationTree {
+        &self.tree
+    }
+
+    /// Export one self-contained path. Brackets cut by an historical boundary are closed
+    /// by the same recovery planner, never by replaying external effects.
+    pub fn fork_events(
+        &self,
+        head: Option<u64>,
+    ) -> Result<Vec<RecordedEvent>, SessionMachineError> {
+        self.require_quiescent()?;
+        if !self.tree.can_select(head) {
+            return invalid("Cannot fork an incomplete boundary");
+        }
+        let source = self.tree.path_events(head);
+        let mut copy = Self::default();
+        let mut result = Vec::new();
+        // Path filtering can cut an original atomic step/turn continuation in half. Imported
+        // evidence is one normalized batch, not a claim that those partial transactions occurred.
+        let tx_id = TxId::random();
+        let close = |copy: &mut Self,
+                     result: &mut Vec<RecordedEvent>,
+                     time: EventTime|
+         -> Result<(), SessionMachineError> {
+            if let Some(batch) = copy.plan_recovery(TxId::random(), time)? {
+                for mut event in batch.events().iter().cloned() {
+                    event.tx_id = tx_id.clone();
+                    copy.apply_in_place(&event)?;
+                    result.push(event);
+                }
+            }
+            Ok(())
+        };
+        for mut record in source {
+            if matches!(record.event, SessionEvent::RunStarted { .. }) && copy.active_run.is_some()
+            {
+                close(&mut copy, &mut result, record.time.clone())?;
+            }
+            record.seq = copy.next_seq;
+            record.tx_id = tx_id.clone();
+            if let SessionEvent::RequestSnapshot {
+                reason,
+                model,
+                instructions,
+                tools,
+                reasoning_effort,
+                max_output_tokens,
+                session_config,
+                ..
+            } = &mut record.event
+            {
+                *reason = copy.expected_request_reason(
+                    model,
+                    instructions.as_deref(),
+                    tools,
+                    *reasoning_effort,
+                    *max_output_tokens,
+                    session_config,
+                );
+            }
+            copy.apply_in_place(&record)?;
+            result.push(record);
+        }
+        if let Some(time) = result.last().map(|record| record.time.clone()) {
+            close(&mut copy, &mut result, time)?;
+        }
+        copy.validate_transaction_boundary()?;
+        copy.require_quiescent()?;
+        Ok(result)
+    }
+
+    pub fn require_quiescent(&self) -> Result<(), SessionMachineError> {
+        if self.active_run.is_some()
+            || self.active_turn.is_some()
+            || self.active_step.is_some()
+            || self.active_compaction.is_some()
+            || !self.open_tools.is_empty()
+            || !self.pending_inputs_order.is_empty()
+        {
+            return invalid(
+                "Finish the current run and clear pending messages before changing branches",
+            );
+        }
+        Ok(())
     }
 
     pub fn context(&self) -> InputParam {
@@ -456,17 +546,43 @@ impl SessionMachine {
                 error: Some("session recovered after an interrupted step".into()),
             });
         }
+        // A normalized fork may stop between a completed child and its parent's terminal.
+        // Preserve the child's outcome instead of inventing an aborted child. Ordinary interrupted
+        // execution still has an active step/compaction and follows the existing abort path.
+        let turn = self.active_turn.as_ref().and_then(|id| self.turns.get(id));
+        let run = self.active_run.as_ref().and_then(|id| self.runs.get(id));
+        let outcome = if self.active_step.is_some()
+            || self.active_compaction.is_some()
+            || run.is_some_and(|run| run.turn_count == 0)
+        {
+            RunOutcome::Aborted
+        } else if turn.is_some_and(|turn| turn.failed_steps > 0)
+            || run.is_some_and(|run| run.failed_turns > 0)
+        {
+            RunOutcome::Failed
+        } else if turn.is_some_and(|turn| turn.aborted_steps > 0)
+            || run.is_some_and(|run| run.aborted_turns > 0)
+        {
+            RunOutcome::Aborted
+        } else {
+            RunOutcome::Completed
+        };
         if let Some(turn_id) = self.active_turn.clone() {
             events.push(SessionEvent::TurnTerminated {
                 turn_id,
-                reason: TurnEndReason::Aborted,
+                reason: match outcome {
+                    RunOutcome::Completed => TurnEndReason::Completed,
+                    RunOutcome::Failed => TurnEndReason::Failed,
+                    RunOutcome::Aborted => TurnEndReason::Aborted,
+                },
             });
         }
         if let Some(run_id) = self.active_run.clone() {
             events.push(SessionEvent::RunTerminated {
                 run_id,
-                outcome: RunOutcome::Aborted,
-                error: Some("session recovered after an interrupted run".into()),
+                outcome,
+                error: (outcome != RunOutcome::Completed)
+                    .then(|| "session recovered after an interrupted run".into()),
             });
         }
         if events.is_empty() {
@@ -500,6 +616,12 @@ impl SessionMachine {
         }
 
         self.apply_event(recorded)?;
+        if !matches!(recorded.event, SessionEvent::SessionForked { .. }) {
+            self.tree.observe(recorded);
+            if let Some(head) = self.tree.head() {
+                self.contexts.insert(head, self.state.clone());
+            }
+        }
         if self.current_tx.as_ref() != Some(&recorded.tx_id) {
             self.current_tx = Some(recorded.tx_id.clone());
             self.seen_txs.insert(recorded.tx_id.clone());
@@ -515,6 +637,43 @@ impl SessionMachine {
     )]
     fn apply_event(&mut self, recorded: &RecordedEvent) -> Result<(), SessionMachineError> {
         match &recorded.event {
+            SessionEvent::ConversationHeadSelected { head } => {
+                self.require_quiescent()?;
+                if !self.tree.can_select(*head) {
+                    return invalid("Unknown or incomplete conversation boundary");
+                }
+                self.state = match head {
+                    Some(id) => self
+                        .contexts
+                        .get(id)
+                        .cloned()
+                        .ok_or_else(|| invalid_error("Missing conversation context"))?,
+                    None => ContextState::default(),
+                };
+                self.last_request_config = None;
+            }
+            SessionEvent::SessionForked { origin, events } => {
+                if self.next_seq != 0
+                    || events.iter().any(|event| {
+                        matches!(
+                            event.event,
+                            SessionEvent::SessionForked { .. }
+                                | SessionEvent::ConversationHeadSelected { .. }
+                        )
+                    })
+                {
+                    return invalid("Fork seed must be a flat history in the first transaction");
+                }
+                let mut seed = Self::from_events(events)?;
+                seed.require_quiescent()?;
+                seed.next_seq = 0;
+                seed.current_tx = None;
+                seed.seen_txs.clear();
+                seed.last_request_config = None;
+                seed.tree.origin = Some(origin.clone());
+                seed.tree.mark_inherited();
+                *self = seed;
+            }
             SessionEvent::RunStarted { run_id } => {
                 ensure_non_empty_id("run", run_id)?;
                 if self.active_run.is_some() || self.runs.contains_key(run_id) {
@@ -1582,6 +1741,310 @@ mod tests {
         let batch = machine.plan_batch(drafts).unwrap();
         all_events.extend(batch.events.iter().cloned());
         machine.apply_batch(batch).unwrap();
+    }
+
+    #[test]
+    fn conversation_heads_preserve_history_and_replay() {
+        let mut machine = SessionMachine::default();
+        let mut events = Vec::new();
+        let mut initial = lifecycle("initial");
+        initial.extend(input_pair("initial", 1, 4));
+        initial.extend(request_events(
+            "initial",
+            Some(AssistantChunk::OutputTextDelta {
+                delta: "superseded draft".into(),
+            }),
+        ));
+        commit(&mut machine, &mut events, initial);
+        let finish = machine
+            .plan_recovery(TxId::random(), time(20))
+            .unwrap()
+            .unwrap();
+        events.extend(finish.events().iter().cloned());
+        machine.apply_batch(finish).unwrap();
+        let old_head = machine.tree().head();
+        assert_eq!(machine.tree().node(old_head.unwrap()).unwrap().text, "done");
+        let user = machine
+            .tree()
+            .nodes()
+            .find(|node| node.input_id().is_some())
+            .unwrap()
+            .id;
+        commit(
+            &mut machine,
+            &mut events,
+            vec![draft(
+                "select",
+                21,
+                SessionEvent::ConversationHeadSelected { head: Some(user) },
+            )],
+        );
+        assert_eq!(machine.tree().head(), Some(user));
+        assert!(
+            !serde_json::to_string(&machine.context())
+                .unwrap()
+                .contains("done")
+        );
+        let replay = SessionMachine::from_events(&events).unwrap();
+        assert_eq!(replay.tree().head(), Some(user));
+        assert_eq!(replay.context(), machine.context());
+        commit(
+            &mut machine,
+            &mut events,
+            vec![draft(
+                "restore",
+                22,
+                SessionEvent::ConversationHeadSelected { head: old_head },
+            )],
+        );
+        assert!(
+            serde_json::to_string(&machine.context())
+                .unwrap()
+                .contains("done")
+        );
+    }
+
+    #[test]
+    fn conversation_fork_excludes_siblings_and_preserves_tool_boundaries() {
+        let mut machine = SessionMachine::default();
+        let mut events = Vec::new();
+        commit(&mut machine, &mut events, lifecycle("start"));
+        commit(&mut machine, &mut events, input_pair("input", 0, 3));
+        let user = machine.tree().head();
+        commit(
+            &mut machine,
+            &mut events,
+            request_with_two_tool_events("tools"),
+        );
+        let response = machine.tree().head();
+        assert!(!machine.tree().can_select(response));
+        let recovery = machine
+            .plan_recovery(TxId::random(), time(25))
+            .unwrap()
+            .unwrap();
+        events.extend(recovery.events().iter().cloned());
+        machine.apply_batch(recovery).unwrap();
+        let completed = machine.tree().head();
+        assert!(machine.tree().can_select(completed));
+        assert!(!machine.tree().can_select(response));
+        let full = machine.context();
+        let child = SessionMachine::from_events(&machine.fork_events(completed).unwrap()).unwrap();
+        assert_eq!(child.context(), full);
+        commit(
+            &mut machine,
+            &mut events,
+            vec![draft(
+                "select-user",
+                30,
+                SessionEvent::ConversationHeadSelected { head: user },
+            )],
+        );
+        let child = SessionMachine::from_events(&machine.fork_events(user).unwrap()).unwrap();
+        assert_eq!(child.context(), machine.context());
+        assert!(
+            !serde_json::to_string(&child.context())
+                .unwrap()
+                .contains("call-z")
+        );
+        let seed = RecordedEvent {
+            seq: 0,
+            tx_id: TxId::random(),
+            time: time(31),
+            event: SessionEvent::SessionForked {
+                origin: crate::ForkOrigin {
+                    session_id: crate::SessionId::new(),
+                    revision: 1,
+                    anchor: user.unwrap(),
+                    head: user,
+                    title: "source".into(),
+                },
+                events: machine.fork_events(user).unwrap(),
+            },
+        };
+        let inherited = SessionMachine::from_events(&[seed]).unwrap();
+        assert!(inherited.tree().nodes().all(|node| node.inherited));
+        assert_eq!(
+            SessionMachine::from_events(&inherited.fork_events(inherited.tree().head()).unwrap())
+                .unwrap()
+                .context(),
+            machine.context()
+        );
+    }
+
+    #[test]
+    fn conversation_fork_closes_a_cut_step_continuation_transaction() {
+        let mut machine = SessionMachine::default();
+        let mut events = Vec::new();
+        commit(&mut machine, &mut events, lifecycle("start"));
+        commit(&mut machine, &mut events, input_pair("first-input", 0, 3));
+        commit(
+            &mut machine,
+            &mut events,
+            request_events("first-response", None),
+        );
+        let before_next_input = machine.tree().head();
+        let expected = machine.context();
+        let mut next = vec![
+            draft(
+                "continue",
+                20,
+                SessionEvent::StepTerminated {
+                    step_id: "step".into(),
+                    outcome: StepOutcome::Completed,
+                    error: None,
+                },
+            ),
+            draft(
+                "continue",
+                21,
+                SessionEvent::StepStarted {
+                    turn_id: "turn".into(),
+                    step_id: "next-step".into(),
+                },
+            ),
+        ];
+        let mut input = input_pair("continue", 1, 22);
+        if let SessionEvent::InputAttached { step_id, .. } = &mut input[1].event {
+            *step_id = "next-step".into();
+        }
+        next.extend(input);
+        commit(&mut machine, &mut events, next);
+        let recovery = machine
+            .plan_recovery(TxId::random(), time(30))
+            .unwrap()
+            .unwrap();
+        machine.apply_batch(recovery).unwrap();
+        let fork = machine.fork_events(before_next_input).unwrap();
+        assert_eq!(
+            SessionMachine::from_events(&fork).unwrap().context(),
+            expected
+        );
+    }
+
+    #[test]
+    fn conversation_context_checkpoints_keep_compaction_local() {
+        let mut machine = SessionMachine::default();
+        let mut events = Vec::new();
+        commit(&mut machine, &mut events, lifecycle("start"));
+        commit(&mut machine, &mut events, input_pair("input-a", 0, 3));
+        let before = machine.tree().head();
+        let original = machine.context();
+        commit(&mut machine, &mut events, input_pair("input-b", 1, 5));
+        commit(
+            &mut machine,
+            &mut events,
+            vec![
+                draft(
+                    "compact",
+                    7,
+                    SessionEvent::CompactionStarted {
+                        compaction_id: "summary".into(),
+                        run_id: "run".into(),
+                        tokens_before: 100,
+                        first_kept_id: 2,
+                        model: None,
+                        reasoning_effort: None,
+                        max_output_tokens: None,
+                    },
+                ),
+                draft(
+                    "compact",
+                    8,
+                    SessionEvent::CompactionFinished {
+                        compaction_id: "summary".into(),
+                        outcome: StepOutcome::Completed,
+                        summary: Some("branch-local summary".into()),
+                        response: None,
+                    },
+                ),
+            ],
+        );
+        let recovery = machine
+            .plan_recovery(TxId::random(), time(25))
+            .unwrap()
+            .unwrap();
+        events.extend(recovery.events().iter().cloned());
+        machine.apply_batch(recovery).unwrap();
+        let after = machine.tree().head();
+        let compacted = machine.context();
+        assert_eq!(
+            SessionMachine::from_events(&machine.fork_events(after).unwrap())
+                .unwrap()
+                .context(),
+            compacted
+        );
+        commit(
+            &mut machine,
+            &mut events,
+            vec![draft(
+                "select-before",
+                30,
+                SessionEvent::ConversationHeadSelected { head: before },
+            )],
+        );
+        assert_eq!(machine.context(), original);
+        assert_eq!(
+            SessionMachine::from_events(&machine.fork_events(before).unwrap())
+                .unwrap()
+                .context(),
+            original
+        );
+        commit(
+            &mut machine,
+            &mut events,
+            vec![draft(
+                "select-after",
+                31,
+                SessionEvent::ConversationHeadSelected { head: after },
+            )],
+        );
+        assert_eq!(machine.context(), compacted);
+        assert_eq!(
+            SessionMachine::from_events(&events).unwrap().context(),
+            compacted
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn conversation_tree_actions_match_independent_paths(actions in prop::collection::vec(0usize..100, 1..45)) {
+            let mut machine = SessionMachine::default();
+            let mut journal = Vec::new();
+            let mut paths: Vec<Vec<String>> = vec![Vec::new()];
+            let mut selected = 0;
+            for (index, action) in actions.into_iter().enumerate() {
+                if action % 3 == 0 {
+                    selected = action % paths.len();
+                    commit(&mut machine, &mut journal, vec![draft(&format!("select-{index}"), index as u64,
+                        SessionEvent::ConversationHeadSelected { head: (selected > 0).then_some(selected as u64) })]);
+                } else {
+                    let run = RunId::random(); let turn = TurnId::random(); let step = StepId::random();
+                    let input_id = InputId::random(); let input = format!("word-{index}");
+                    let tx = format!("input-{index}");
+                    let batch = vec![
+                        SessionEvent::InputSubmitted { input_id: input_id.clone(), input: input.clone(), origin: InputOrigin::Initial },
+                        SessionEvent::RunStarted { run_id: run.clone() },
+                        SessionEvent::TurnStarted { run_id: run, turn_id: turn.clone() },
+                        SessionEvent::StepStarted { turn_id: turn, step_id: step.clone() },
+                        SessionEvent::InputAttached { input_id, step_id: step, items: vec![EasyInputMessage::from(input.clone()).into()] },
+                    ];
+                    commit(&mut machine, &mut journal, batch.into_iter().map(|e| draft(&tx,index as u64,e)).collect());
+                    let finish = machine.plan_recovery(TxId::random(), time(index as u64)).unwrap().unwrap();
+                    journal.extend(finish.events().iter().cloned()); machine.apply_batch(finish).unwrap();
+                    let mut path = paths[selected].clone(); path.push(input); paths.push(path); selected = paths.len()-1;
+                }
+                let expected = async_openai::types::responses::InputParam::Items(paths[selected].iter()
+                    .map(|text| InputItem::from(EasyInputMessage::from(text.clone()))).collect());
+                prop_assert_eq!(machine.context(), expected.clone());
+                let replay = SessionMachine::from_events(&journal).unwrap();
+                prop_assert_eq!(replay.context(), expected.clone());
+                prop_assert_eq!(replay.tree().head(), machine.tree().head());
+                let fork = machine.fork_events(machine.tree().head()).unwrap();
+                let child = SessionMachine::from_events(&fork).unwrap();
+                prop_assert_eq!(child.context(), expected);
+                prop_assert!(!child.tree().has_branches());
+            }
+        }
     }
 
     fn input_pair(tx: &str, index: usize, offset: u64) -> Vec<EventDraft> {

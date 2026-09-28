@@ -38,7 +38,7 @@ pub(crate) fn empty_conversation_view_model(state: &AppState) -> EmptyConversati
 }
 
 pub(crate) fn composer_status(state: &AppState) -> String {
-    let stats = state.session_view.trajectory.stats();
+    let stats = state.session_view.actual_stats;
     if stats.turns == 0
         && stats.steps == 0
         && stats.llm_ns == 0

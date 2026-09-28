@@ -562,3 +562,14 @@ caps the pending list height and scrolls overflow so the composer remains usable
 See the [input protocol](session.md#pending-input-control) and its
 [TLA+ model](tla/input-queue/README.md). Headless GPUI checks exercise the primary button's rendered
 presence; native acceptance uses an isolated data root and a gated local Responses endpoint.
+
+## Conversation editing and session relations
+
+The [conversation tree contract](conversation-tree.md) defines editing, Fork, relationship
+navigation and archive behavior. The runtime keeps the full canonical document and renders
+only the active path. Head changes rebuild Chat and Trajectory; later receipts append normally.
+The desktop offers a single relationship icon with clickable direct parents and children, and
+a `Continued from chat` link at the child's inherited/local boundary. Archived targets open
+the existing restore landing page. Fork is offered only on completed, safe assistant responses;
+message editing preserves the ordinary composer draft. Relationship navigation does not alter
+a durable head or start a model request. GPUI regressions cover these interactions.

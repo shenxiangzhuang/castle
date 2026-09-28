@@ -46,6 +46,8 @@ placement.
 
 - `InputSubmitted` durably owns an input. `InputAttached` simultaneously removes it from the inbox,
   places the user surface item, and binds it to one run/turn/step. There is no `InputConsumed`.
+  `InputPrioritized` changes the pending input origin to steering without changing its identity;
+  `InputCancelled` removes inbox membership while retaining the journal record.
 - Assistant completion and its finalized tool declarations are one transition.
 - Tool authorization and dispatch intent are committed before any runner task exists. The runner
   samples execution start immediately before invoking the tool and reports that observation back
@@ -90,3 +92,23 @@ placement.
 - A 100k-event storage benchmark checks replay and storage footprint.
 - Desktop projection and presentation checks are documented in
   [Desktop architecture](desktop.md#verification-gates).
+
+## Pending input control
+
+Desktop submission while running always queues. A queue entry can be prioritized or cancelled
+by its durable `InputId`. The owner serializes these commands with attachment: already attached
+or cancelled inputs reject stale actions without failing the active run. Within each priority,
+admission order is preserved; steering takes precedence at a response/tool boundary, while queued
+input starts a new turn only when the current turn would settle. Neither interrupts live tools.
+
+Submission acknowledgements follow committed `InputSubmitted` events. Stop is observed before
+selecting another pending input; an already selected/committing attachment may win a simultaneous
+stop. Cancellation never deletes remaining pending messages and does not automatically restart.
+`Agent::resume_pending` explicitly starts with the oldest prioritized message, otherwise the oldest
+queued message, reusing its identity. Sending a new message while idle is also an explicit new run;
+remaining messages are then drained after that message. Reopening only reconstructs pending state.
+An idle cancellation acquires the same writer, reloads/recovers the session, and returns all
+committed receipts to the host even if the requested cancellation loses to earlier consumption.
+
+The [input queue model](tla/input-queue/README.md) checks bounded protocol interleavings alongside
+Rust property and gated HTTP tests. The session/tool model retains its narrower tool boundary.

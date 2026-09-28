@@ -68,20 +68,12 @@ pub(crate) enum Appearance {
     Dark,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum EnterBehavior {
-    #[default]
-    Steer,
-    Queue,
-}
-
 #[derive(Default)]
 struct StoredSettings {
     reasoning_efforts: HashMap<String, String>,
     selected_model: Option<String>,
     allow_all_tools: bool,
     appearance: Appearance,
-    enter_behavior: EnterBehavior,
     reduce_motion: bool,
     trajectory_actual_duration: bool,
     providers: Vec<ProviderProfile>,
@@ -175,18 +167,6 @@ impl SettingsStore {
         self.save()
     }
 
-    pub(crate) fn enter_behavior(&self) -> EnterBehavior {
-        self.stored.enter_behavior
-    }
-
-    pub(crate) fn set_enter_behavior(
-        &mut self,
-        behavior: EnterBehavior,
-    ) -> Result<(), Box<dyn Error>> {
-        self.stored.enter_behavior = behavior;
-        self.save()
-    }
-
     pub(crate) fn reduce_motion(&self) -> bool {
         self.stored.reduce_motion
     }
@@ -243,7 +223,6 @@ fn load_settings(store: &AppStore) -> Result<StoredSettings, Box<dyn Error>> {
                     selected_model: row.get(0)?,
                     allow_all_tools: row.get::<_, i64>(1)? != 0,
                     appearance: appearance_from_sql(row.get::<_, String>(2)?, 2)?,
-                    enter_behavior: enter_behavior_from_sql(row.get::<_, String>(3)?, 3)?,
                     reduce_motion: row.get::<_, i64>(4)? != 0,
                     trajectory_actual_duration: row.get::<_, i64>(5)? != 0,
                     providers: Vec::new(),
@@ -339,7 +318,7 @@ fn save_settings_with_transaction(
             stored.selected_model,
             i64::from(stored.allow_all_tools),
             appearance_to_sql(stored.appearance),
-            enter_behavior_to_sql(stored.enter_behavior),
+            "queue",
             i64::from(stored.reduce_motion),
             i64::from(stored.trajectory_actual_duration),
         ],
@@ -401,21 +380,6 @@ fn appearance_from_sql(value: String, column: usize) -> rusqlite::Result<Appeara
     }
 }
 
-fn enter_behavior_to_sql(value: EnterBehavior) -> &'static str {
-    match value {
-        EnterBehavior::Steer => "steer",
-        EnterBehavior::Queue => "queue",
-    }
-}
-
-fn enter_behavior_from_sql(value: String, column: usize) -> rusqlite::Result<EnterBehavior> {
-    match value.as_str() {
-        "steer" => Ok(EnterBehavior::Steer),
-        "queue" => Ok(EnterBehavior::Queue),
-        _ => Err(invalid_text_value(column, "enter behavior", value)),
-    }
-}
-
 fn invalid_text_value(column: usize, label: &str, value: String) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         column,
@@ -465,7 +429,6 @@ mod tests {
             .set_effort("test/model", &ReasoningEffort::Low)
             .unwrap();
         store.set_appearance(Appearance::Dark).unwrap();
-        store.set_enter_behavior(EnterBehavior::Queue).unwrap();
         store.set_reduce_motion(true).unwrap();
         store.set_trajectory_actual_duration(true).unwrap();
         store
@@ -503,7 +466,6 @@ mod tests {
         );
         assert_eq!(store.selected_model(), Some("test/model"));
         assert_eq!(store.appearance(), Appearance::Dark);
-        assert_eq!(store.enter_behavior(), EnterBehavior::Queue);
         assert!(store.reduce_motion());
         assert!(store.trajectory_actual_duration());
         assert_eq!(store.provider_profiles()[0].api_key(), Some("secret"));

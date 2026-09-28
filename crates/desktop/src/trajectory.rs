@@ -7204,6 +7204,9 @@ mod tests {
             },
             None,
         );
+        // Geometry and field-change cursors are independent (input attachment changes layout).
+        cache.change_revision = projection.change_revision();
+        hidden_cache.change_revision = projection.change_revision();
         let focused = Arc::clone(&cache.focus.as_ref().unwrap().record_indices);
 
         for _ in 0..300 {

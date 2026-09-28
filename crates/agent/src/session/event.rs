@@ -206,6 +206,12 @@ pub enum SessionEvent {
         input: String,
         origin: InputOrigin,
     },
+    InputPrioritized {
+        input_id: InputId,
+    },
+    InputCancelled {
+        input_id: InputId,
+    },
     InputAttached {
         input_id: InputId,
         step_id: StepId,

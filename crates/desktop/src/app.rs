@@ -45,7 +45,7 @@ use crate::platform::gpui::{
 use crate::project::{ProjectId, ProjectStore};
 #[cfg(test)]
 use crate::settings::ProviderModel;
-use crate::settings::{Appearance, EnterBehavior, SettingsStore};
+use crate::settings::{Appearance, SettingsStore};
 use crate::trajectory::{
     TimelineModelCache, TrajectoryDetailsLayoutState, TrajectoryDetailsMarkdownCache,
 };
@@ -232,6 +232,8 @@ pub(crate) struct DesktopApp {
     pub(crate) selected_runtime: Entity<SessionRuntime>,
     project_runtimes: HashMap<ProjectId, ProjectSessionRuntimes>,
     pub(crate) input: Entity<TextareaState>,
+    pub(crate) composer_submitting: bool,
+    composer_edit_revision: u64,
     pub(crate) session_search: Entity<InputState>,
     pub(crate) trajectory_search: Entity<InputState>,
     trajectory_query_value: String,
@@ -368,6 +370,7 @@ impl DesktopApp {
                     }
                 }
                 InputEvent::Change => {
+                    this.composer_edit_revision = this.composer_edit_revision.saturating_add(1);
                     if this.core.follow_chat_tail {
                         this.schedule_chat_tail(window);
                     }
@@ -447,6 +450,8 @@ impl DesktopApp {
             selected_runtime: runtime,
             project_runtimes,
             input,
+            composer_submitting: false,
+            composer_edit_revision: 0,
             session_search,
             trajectory_search,
             trajectory_query_value: String::new(),
@@ -1270,7 +1275,7 @@ impl DesktopApp {
     }
 
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection_pending() {
+        if self.selection_pending() || self.composer_submitting {
             return;
         }
         if !self.models[self.selected_model].model.has_api_key() {
@@ -1281,16 +1286,106 @@ impl DesktopApp {
         if value.is_empty() {
             return;
         }
-        self.input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        let runtime = self.selected_runtime.clone();
+        let Some(accepted) = runtime.update(cx, |runtime, cx| runtime.submit(value, window, cx))
+        else {
+            return;
+        };
+        let revision = self.composer_edit_revision;
+        let original = self.input.read(cx).value().to_string();
+        self.composer_submitting = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = accepted
+                .await
+                .unwrap_or_else(|_| Err("Message was not accepted; please retry".into()));
+            let _ = cx.update(|window, app| {
+                this.update(app, |this, cx| {
+                    this.composer_submitting = false;
+                    if this.selected_runtime != runtime {
+                        cx.notify();
+                        return;
+                    }
+                    match result {
+                        Ok(()) => {
+                            if this.composer_edit_revision == revision
+                                && this.input.read(cx).value().as_str() == original
+                            {
+                                this.input.update(cx, |input, cx| {
+                                    input.set_value("", window, cx);
+                                    input.set_placeholder("Message the agent", window, cx);
+                                });
+                            }
+                            this.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
+                        }
+                        Err(error) => this.notice(error),
+                    }
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn edit_pending(
+        &mut self,
+        input_id: kcastle_agent::InputId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection_pending()
+            || self.composer_submitting
+            || !self.input.read(cx).value().is_empty()
+        {
+            return;
+        }
+        let runtime = self.selected_runtime.clone();
+        let Some(pending) = runtime
+            .read(cx)
+            .pending_inputs()
+            .into_iter()
+            .find(|input| input.input_id == input_id)
+        else {
+            return;
+        };
+        let Some(accepted) = runtime.update(cx, |runtime, cx| {
+            runtime.change_pending(input_id, false, window, cx)
+        }) else {
+            return;
+        };
+        let original = pending.input;
         self.input.update(cx, |input, cx| {
-            input.set_placeholder("Message the agent", window, cx)
+            input.set_value(original.clone(), window, cx);
+            input.focus(window, cx);
         });
-        let behavior = self.settings.enter_behavior();
-        self.selected_runtime.update(cx, |runtime, cx| {
-            runtime.submit(value, behavior, window, cx)
-        });
-        self.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
+        let revision = self.composer_edit_revision;
+        // Editing may continue, but resubmission must wait for durable withdrawal.
+        self.composer_submitting = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = accepted
+                .await
+                .unwrap_or_else(|_| Err("Message could not be withdrawn".into()));
+            let _ = cx.update(|window, app| {
+                this.update(app, |this, cx| {
+                    this.composer_submitting = false;
+                    if this.selected_runtime != runtime {
+                        cx.notify();
+                        return;
+                    }
+                    if let Err(error) = result {
+                        if this.composer_edit_revision == revision
+                            && this.input.read(cx).value().as_str() == original
+                        {
+                            this.input.update(cx, |input, cx| input.set_value("", window, cx));
+                        }
+                        this.notice(format!("Could not edit pending message: {error}. Any changes you made remain in the composer."));
+                    }
+                    cx.notify();
+                })
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn decide(&mut self, call_id: String, allow: bool, cx: &mut Context<Self>) {
@@ -2434,13 +2529,6 @@ impl DesktopApp {
         cx.notify();
     }
 
-    pub(crate) fn set_enter_behavior(&mut self, behavior: EnterBehavior, cx: &mut Context<Self>) {
-        if let Err(error) = self.settings.set_enter_behavior(behavior) {
-            self.notice(format!("Could not save Enter behavior: {error}"));
-        }
-        cx.notify();
-    }
-
     pub(crate) fn set_reduce_motion(&mut self, reduce: bool, cx: &mut Context<Self>) {
         if let Err(error) = self.settings.set_reduce_motion(reduce) {
             self.notice(format!("Could not save motion preference: {error}"));
@@ -2724,6 +2812,331 @@ mod tests {
             weak_view.upgrade().is_none(),
             "closing the test window must release its app and session database handles"
         );
+    }
+
+    #[gpui_kit::test]
+    fn pending_edit_withdraws_before_resubmission_and_preserves_drafts(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        for switch_session in [false, true] {
+            let executor = tokio::runtime::Runtime::new().unwrap();
+            let _entered = executor.enter();
+            cx.background_executor.allow_parking();
+            let root =
+                std::env::temp_dir().join(format!("kcastle-pending-edit-{}", SessionId::new()));
+            let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
+            // Leave the provider response blocked while queue commands are processed.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let model = Model::new(
+                "test",
+                "key",
+                format!("http://{}", listener.local_addr().unwrap()),
+                "test-model",
+                10_000,
+            );
+            startup.models = vec![ConfiguredModel::new(
+                "test",
+                ProviderModel::new("test-model", "Test", 10_000, None),
+                model.clone(),
+            )];
+            startup.selected_model = 0;
+            startup.agent.set_model(model.clone());
+            cx.update(crate::init_ui);
+            let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+            cx.simulate_resize(gpui_kit::size(px(1180.0), px(720.0)));
+            cx.update(|window, cx| {
+                view.update(cx, |app, cx| {
+                    app.input
+                        .update(cx, |input, cx| input.set_value("working", window, cx));
+                    app.submit(window, cx);
+                })
+            });
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            while view.read_with(cx, |app, _| app.composer_submitting) {
+                assert!(Instant::now() < deadline);
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            cx.update(|window, cx| {
+                view.update(cx, |app, cx| {
+                    for text in [
+                        "edit while running",
+                        "edit while paused",
+                        "already withdrawn",
+                    ] {
+                        assert!(
+                            app.selected_runtime
+                                .update(cx, |runtime, cx| runtime.submit(text.into(), window, cx))
+                                .is_some()
+                        );
+                    }
+                })
+            });
+            while view.read_with(cx, |app, cx| {
+                app.selected_runtime.read(cx).pending_inputs().len() != 3
+            }) {
+                assert!(Instant::now() < deadline);
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let pending =
+                view.read_with(cx, |app, cx| app.selected_runtime.read(cx).pending_inputs());
+            cx.update(|window, cx| {
+                view.update(cx, |app, cx| {
+                    app.input.update(cx, |input, cx| {
+                        input.set_value("existing draft", window, cx)
+                    });
+                    app.edit_pending(pending[0].input_id.clone(), window, cx);
+                    assert_eq!(app.input.read(cx).value().as_str(), "existing draft");
+                    assert!(!app.composer_submitting);
+                    assert_eq!(app.selected_runtime.read(cx).pending_inputs().len(), 3);
+                    app.input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    app.edit_pending(pending[0].input_id.clone(), window, cx);
+                    assert_eq!(app.input.read(cx).value().as_str(), "edit while running");
+                    assert!(app.composer_submitting);
+                    app.input
+                        .update(cx, |input, cx| input.set_value("revised draft", window, cx));
+                    app.submit(window, cx); // Must not submit while withdrawal is unacknowledged.
+                })
+            });
+            while view.read_with(cx, |app, cx| {
+                app.composer_submitting || app.selected_runtime.read(cx).pending_inputs().len() != 2
+            }) {
+                assert!(Instant::now() < deadline);
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            view.read_with(cx, |app, cx| {
+                assert_eq!(app.input.read(cx).value().as_str(), "revised draft")
+            });
+            cx.update(|_, cx| view.update(cx, |app, cx| app.abort(cx)));
+            while view.read_with(cx, |app, cx| app.selected_runtime.read(cx).is_active()) {
+                assert!(Instant::now() < deadline);
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            cx.update(|window, cx| {
+                view.update(cx, |app, cx| {
+                    app.input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    app.edit_pending(pending[1].input_id.clone(), window, cx);
+                })
+            });
+            while view.read_with(cx, |app, _| app.composer_submitting) {
+                assert!(Instant::now() < deadline);
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let path = view.read_with(cx, |app, cx| {
+                assert_eq!(app.input.read(cx).value().as_str(), "edit while paused");
+                assert_eq!(app.selected_runtime.read(cx).pending_inputs().len(), 1);
+                app.selected_runtime.read(cx).snapshot().session.path
+            });
+            // Another writer withdraws the last message; the UI still has a stale row.
+            executor.block_on(async {
+                let session = Session::open(&path).await.unwrap();
+                let agent = Agent::new(model, "test", session, ".");
+                let (_, _, result) = agent
+                    .cancel_pending_input(pending[2].input_id.clone())
+                    .await;
+                result.unwrap();
+            });
+            let source = view.read_with(cx, |app, _| app.selected_runtime.clone());
+            cx.update(|window, cx| {
+                view.update(cx, |app, cx| {
+                    app.input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    app.edit_pending(pending[2].input_id.clone(), window, cx);
+                    assert_eq!(app.input.read(cx).value().as_str(), "already withdrawn");
+                    if switch_session {
+                        let other = app
+                            .create_runtime(
+                                app.core.workspace.active_project,
+                                Session::memory(),
+                                cx,
+                            )
+                            .unwrap();
+                        app.select_runtime(other, cx);
+                        app.input
+                            .update(cx, |input, cx| input.set_value("other draft", window, cx));
+                    }
+                })
+            });
+            while view.read_with(cx, |app, _| app.composer_submitting) {
+                assert!(Instant::now() < deadline);
+                cx.run_until_parked();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            view.read_with(cx, |app, cx| {
+                if switch_session {
+                    assert_eq!(app.input.read(cx).value().as_str(), "other draft");
+                    assert!(
+                        app.core.transient_messages.is_empty(),
+                        "a different session must not receive the edit error"
+                    );
+                } else {
+                    assert!(
+                        app.input.read(cx).value().is_empty(),
+                        "failed withdrawal must remove the untouched copy"
+                    );
+                }
+                assert!(source.read(cx).pending_inputs().is_empty());
+                assert!(source.read(cx).input_error.is_some());
+            });
+            drop(source);
+            close_test_window(view, cx);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn admission_receipt_does_not_scroll_another_session(cx: &mut gpui_kit::TestAppContext) {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
+        cx.background_executor.allow_parking();
+        let root = std::env::temp_dir().join(format!("kcastle-draft-receipt-{}", SessionId::new()));
+        let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        let (model, server) = text_stream_model("done");
+        startup.models = vec![ConfiguredModel::new(
+            "test",
+            crate::settings::ProviderModel::new("test-model", "Test", 10_000, None),
+            model.clone(),
+        )];
+        startup.selected_model = 0;
+        startup.agent.set_model(model);
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        let source = view.read_with(cx, |app, _| app.selected_runtime.clone());
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.input.update(cx, |input, cx| {
+                    input.set_value("accepted message", window, cx)
+                });
+                app.submit(window, cx);
+                assert!(app.composer_submitting);
+                let other = app
+                    .create_runtime(app.core.workspace.active_project, Session::memory(), cx)
+                    .unwrap();
+                app.select_runtime(other, cx);
+                app.dispatch(Action::Scroll(ScrollIntent::Away), window, cx);
+                assert!(!app.core.follow_chat_tail);
+                app.input
+                    .update(cx, |input, cx| input.set_value("new draft", window, cx));
+            })
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        // The background source still owns its database until its run has joined.
+        while view.read_with(cx, |app, cx| {
+            app.composer_submitting || source.read(cx).is_active()
+        }) {
+            assert!(Instant::now() < deadline, "submission did not settle");
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        server.join().unwrap();
+        view.read_with(cx, |app, cx| {
+            assert_eq!(app.input.read(cx).value().as_str(), "new draft");
+            assert!(
+                !app.core.follow_chat_tail,
+                "late receipt from another session changed the current scroll policy"
+            );
+        });
+        drop(source);
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn admission_receipt_preserves_a_newer_draft(cx: &mut gpui_kit::TestAppContext) {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
+        cx.background_executor.allow_parking();
+        let root = std::env::temp_dir().join(format!("kcastle-draft-receipt-{}", SessionId::new()));
+        let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        let (model, server) = text_stream_model("done");
+        startup.models = vec![ConfiguredModel::new(
+            "test",
+            crate::settings::ProviderModel::new("test-model", "Test", 10_000, None),
+            model.clone(),
+        )];
+        startup.selected_model = 0;
+        startup.agent.set_model(model);
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.input.update(cx, |input, cx| {
+                    input.set_value("accepted message", window, cx)
+                });
+                app.submit(window, cx);
+                assert!(app.composer_submitting);
+                app.input
+                    .update(cx, |input, cx| input.set_value("new draft", window, cx));
+            })
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while view.read_with(cx, |app, cx| {
+            app.composer_submitting || app.selected_runtime.read(cx).is_active()
+        }) {
+            assert!(Instant::now() < deadline, "submission did not settle");
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        server.join().unwrap();
+        view.read_with(cx, |app, cx| {
+            assert_eq!(app.input.read(cx).value().as_str(), "new draft");
+            let snapshot = app.selected_runtime.read(cx).snapshot();
+            assert!(
+                snapshot
+                    .view
+                    .conversation
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "accepted message")
+            );
+        });
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn composer_primary_button_tracks_running_and_draft_content(cx: &mut gpui_kit::TestAppContext) {
+        let root =
+            std::env::temp_dir().join(format!("kcastle-composer-buttons-{}", SessionId::new()));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        cx.simulate_resize(gpui_kit::size(px(1180.0), px(720.0)));
+        for running in [false, true] {
+            for text in ["", "  ", "next task"] {
+                cx.update(|window, cx| {
+                    view.update(cx, |app, cx| {
+                        app.core.run = if running {
+                            RunState::Running {
+                                run: crate::domain::RunId::default(),
+                            }
+                        } else {
+                            RunState::Idle
+                        };
+                        app.input
+                            .update(cx, |input, cx| input.set_value(text, window, cx));
+                        cx.notify();
+                    })
+                });
+                cx.run_until_parked();
+                assert_eq!(
+                    cx.debug_bounds("stop").is_some(),
+                    running && text.trim().is_empty()
+                );
+                assert_eq!(
+                    cx.debug_bounds("send").is_some(),
+                    !running || !text.trim().is_empty()
+                );
+            }
+        }
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui_kit::test]
@@ -3517,7 +3930,7 @@ mod tests {
         });
         cx.update(|window, app| {
             draft.update(app, |runtime, cx| {
-                runtime.submit("hello".into(), EnterBehavior::Steer, window, cx);
+                runtime.submit("hello".into(), window, cx);
             });
         });
         let deadline = Instant::now() + std::time::Duration::from_secs(10);

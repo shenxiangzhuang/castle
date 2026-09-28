@@ -534,3 +534,31 @@ The [release protocol](../development/release.md#macos-architecture-split) retai
 Universal bridge and its feed indefinitely. Legacy clients first install that bridge, then a
 higher native version. Later releases leave the old prefix untouched. Availability of the
 frozen feed/packages is a deployment assumption, not a property of the session or Chat models.
+
+## Composer and pending messages
+
+Enter submits; Shift+Enter inserts a newline. During a run, submission always queues and the
+composer shows durable pending entries above the input. Pending entries do not appear in Chat
+until attachment; Trajectory retains their pending, prioritized, or cancelled history. Prioritize
+changes the same input's mode, and Remove cancels it. The global busy-Enter preference is removed;
+its legacy SQLite column remains readable for database compatibility and is saved as `queue`.
+
+Edit reuses cancellation: it copies the pending text into the focused composer, and blocks Send
+until withdrawal is durably acknowledged. Editing is unavailable while a draft exists or another
+submission/edit is awaiting acknowledgement. Users may revise the copied text during withdrawal;
+the acknowledgement never replaces those revisions. If withdrawal loses to attachment or another
+cancellation, the untouched copy is cleared and an error is shown; user revisions remain. Resending
+admits a new queued message at the tail. The editor remains a volatile draft, like ordinary input.
+
+The primary button is Stop only when running with an empty/whitespace draft; otherwise it is Send
+(disabled when empty, preparing, unconfigured, or awaiting submission admission). Drafts clear only
+after durable admission and only if the selected runtime and draft revision still match. Errors
+retain the draft. Submission and edit acknowledgements release the shared composer busy flag,
+but may change the draft, scroll position, or transient notices only while their originating
+runtime is still selected. Queue mutation feedback follows receipts; stale actions display an error without
+aborting the task. Stop leaves pending entries paused; Continue resumes them explicitly. Rendering
+caps the pending list height and scrolls overflow so the composer remains usable.
+
+See the [input protocol](session.md#pending-input-control) and its
+[TLA+ model](tla/input-queue/README.md). Headless GPUI checks exercise the primary button's rendered
+presence; native acceptance uses an isolated data root and a gated local Responses endpoint.

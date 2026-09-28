@@ -48,3 +48,30 @@ changes also require manual validation in the packaged application.
 
 Update user-facing documentation when core usage changes. Use Conventional Commits:
 `<type>(<scope>): <subject>`.
+
+## Pending-message acceptance
+
+Use a packaged app with an isolated `KCASTLE_DATA_DIR` and a local Responses-compatible provider
+whose replies can be held open. Do not point this check at a production provider or user sessions.
+
+1. Start a message and hold its response. An empty draft shows Stop; typing text shows Send.
+2. Send two follow-ups. Both appear above the composer, not in Chat; the draft clears after
+   admission and the primary button returns to Stop. A legacy `enter_behavior = 'steer'` preference
+   must still queue submissions.
+3. Prioritize the second follow-up, then submit and remove a third. Release the first response:
+   only the prioritized follow-up joins Chat and the next request; the ordinary follow-up remains
+   pending and the removed text never enters a request.
+4. Stop while that response is held. The remaining queue stays paused, with Continue available.
+   Continue consumes the original message identity exactly once. Verify IDs and ordering in the
+   journal, not only the bubbles.
+5. Stop with another pending message, reopen the app/session, and confirm no request starts merely
+   from reopening. The paused message can be removed without starting a model request.
+6. Click Edit on a pending message: its original text returns to the focused composer. Revise and
+   send it; only the revised text may enter a later request. Repeat while paused. With an existing
+   draft, Edit is disabled and the tooltip explains why. Check that stale withdrawal reports an
+   error and never discards revisions typed while withdrawal was pending.
+7. Verify both narrow and wide composer layouts; pending content scrolls within the capped list.
+
+Automated coverage includes the gated agent integration test, the pending-input property test,
+projection replay, rendered primary-button states, and preservation of a newer draft when an older
+submission acknowledgement arrives. The bounded protocol is checked by the input-queue TLA+ model.

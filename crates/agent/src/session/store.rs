@@ -2162,6 +2162,7 @@ mod tests {
     use crate::session::machine::SessionMachine;
     use crate::session::{SessionConfig, SessionId};
     use async_openai::types::responses::{EasyInputMessage, InputItem};
+    use proptest::prelude::*;
     use rusqlite::{Connection, params};
     use std::fs::{File, OpenOptions, TryLockError};
     use std::process::{Command, Stdio};
@@ -2943,6 +2944,58 @@ mod tests {
         drop(permit);
         drop(store);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn persisted_json() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("null".to_owned()),
+            any::<bool>().prop_map(|value| value.to_string()),
+            any::<i64>().prop_map(|value| value.to_string()),
+            ".{0,16}".prop_map(|value| serde_json::to_string(&value).unwrap()),
+        ]
+        .prop_recursive(3, 64, 6, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..6)
+                    .prop_map(|values| format!("[{}]", values.join(","))),
+                prop::collection::btree_map("[a-z]{1,8}", inner, 0..6)
+                    .prop_flat_map(
+                        |fields| Just(fields.into_iter().collect::<Vec<_>>()).prop_shuffle()
+                    )
+                    .prop_map(|fields| {
+                        let fields = fields
+                            .into_iter()
+                            .map(|(key, value)| format!("\"{key}\":{value}"))
+                            .collect::<Vec<_>>();
+                        format!("{{{}}}", fields.join(","))
+                    }),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn persisted_request_digest_preserves_nested_json_key_order(
+            value in persisted_json(),
+            base_revision in 0_u64..10_000,
+        ) {
+            // Generate persisted bytes directly: constructing Value first would let the
+            // reader's map ordering normalize the fixture and hide this compatibility bug.
+            let json = format!(
+                r#"{{"seq":0,"tx_id":"tx","time":{{"wall_time_ms":0,"clock_id":"clock","monotonic_ns":0}},"type":"request_snapshot","request_id":"request","step_id":"step","reason":"initial","model":"model","tools":[{{"type":"function","name":"shell","parameters":{{"const":{value}}},"strict":false,"description":"Shell"}}],"session_config":{{"allow_all_tools":true}}}}"#,
+            );
+            let event: RecordedEvent = serde_json::from_str(&json).unwrap();
+            let mut persisted_digest = super::StableDigestWriter::new();
+            use std::io::Write;
+            write!(
+                persisted_digest,
+                "{{\"base_revision\":{base_revision},\"events\":[{json}]}}"
+            )
+            .unwrap();
+            prop_assert_eq!(
+                super::request_digest(base_revision, &[event]).unwrap(),
+                persisted_digest.finish(),
+            );
+        }
     }
 
     #[test]

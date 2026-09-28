@@ -42,6 +42,11 @@ before accepting another append. Event observation time is distinct from transac
 Durations use monotonic time only within one clock/boot identity; wall time is used for actual-time
 placement.
 
+Journal digest verification reserializes recorded events, including arbitrary JSON in tool schemas.
+All builds explicitly enable `serde_json/preserve_order` so replay retains the persisted object-key
+order. This reads both sorted and insertion-ordered historical objects without changing their
+digests; the storage contract must not depend on desktop dependencies enabling that feature.
+
 ## Atomic domain boundaries
 
 - `InputSubmitted` durably owns an input. `InputAttached` simultaneously removes it from the inbox,

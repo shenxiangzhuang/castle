@@ -538,6 +538,92 @@ fn chat_cache_benchmark(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn reasoning_chunk_boundaries_preserve_spacing_and_copy(cx: &mut TestAppContext) {
+    use gpui_kit::{IntoElement, ParentElement, Render, Styled, Window, div};
+
+    struct SelectableApp(Entity<DesktopApp>);
+    impl Render for SelectableApp {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(gpui_kit::base::TextSelectionLayer)
+                .child(self.0.clone())
+        }
+    }
+    let (root, view, cx) = setup(cx);
+    cx.update(|window, cx| {
+        window.replace_root(cx, |_, _| SelectableApp(view.clone()));
+    });
+    for prefix in ["Earlier reasoning.\n\n".repeat(120), "".to_owned()] {
+        for separator in ["\n\n", "\n\n\n\n"] {
+            let tail = format!("First paragraph.{separator}Second paragraph.");
+            let mut snapshot = fixture(79998, 1, "");
+            let message = Arc::make_mut(&mut Arc::make_mut(&mut snapshot).conversation.messages[0]);
+            message.role = Role::Reasoning;
+            message.revision = (prefix.len() + separator.len()) as u64;
+            message.text = format!("{prefix}{tail}");
+            view.update(cx, |app, cx| {
+                publish(app, &snapshot, "reasoning-spacing", cx)
+            });
+            cx.run_until_parked();
+            view.update(cx, |app, cx| {
+                if !app
+                    .message_presentations
+                    .borrow()
+                    .expanded(MessageId(79998))
+                {
+                    app.toggle_reasoning(0, cx);
+                }
+            });
+            cx.run_until_parked();
+            let body = cx.debug_bounds("chat-plain:79998").unwrap();
+            let (start, end) = view.read_with(cx, |app, _| {
+                let chat = app.chat.borrow();
+                let first = chat.rows.iter().position(|row| row.plain().starts_with("First paragraph.")).unwrap();
+                let last = chat.rows.len() - 1;
+                let first_bounds = chat.list.bounds_for_item(first).unwrap();
+                let last_bounds = chat.list.bounds_for_item(last).unwrap();
+                assert_eq!(
+                    last_bounds.bottom() - first_bounds.top(),
+                    px((separator.len() + 1) as f32 * 26.0 + 4.0),
+                    "chunking must not add blank lines or padding: prefix={}, separator={separator:?}",
+                    prefix.len()
+                );
+                (
+                    gpui_kit::point(body.left() + px(36.0), first_bounds.top() + body.bottom() - last_bounds.bottom() + px(13.0)),
+                    gpui_kit::point(body.right() - px(1.0), body.bottom() - px(17.0)),
+                )
+            });
+            cx.simulate_mouse_down(
+                start,
+                gpui_kit::MouseButton::Left,
+                gpui_kit::Modifiers::default(),
+            );
+            cx.simulate_mouse_move(
+                end,
+                Some(gpui_kit::MouseButton::Left),
+                gpui_kit::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                end,
+                gpui_kit::MouseButton::Left,
+                gpui_kit::Modifiers::default(),
+            );
+            cx.run_until_parked();
+            assert_eq!(
+                cx.update(gpui_kit::base::TextSelection::selected_text),
+                tail
+            );
+            cx.update(gpui_kit::base::TextSelection::clear);
+        }
+    }
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
 fn expanding_reasoning_preserves_assistant_content(cx: &mut TestAppContext) {
     let (root, view, cx) = setup(cx);
     let mut snapshot = fixture(80000, 1, "First paragraph.\n\nLast paragraph $x$.");

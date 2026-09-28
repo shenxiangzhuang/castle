@@ -15,6 +15,7 @@ use crate::ui_theme::palette;
 
 impl Render for DesktopApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_composer_restore(window, cx);
         self.apply_pending_trajectory_query_restore(window, cx);
         self.html_previews.sync(
             self.chat.borrow().namespace(),
@@ -27,6 +28,10 @@ impl Render for DesktopApp {
                 .map(|message| message.as_ref()),
         );
         let empty = conversation_view_model(&self.core).empty;
+        let runtime = self.selected_runtime.read(cx);
+        let archived = runtime.snapshot().session.is_archived();
+        let show_header =
+            !empty || runtime.tree().origin.is_some() || !runtime.fork_children.is_empty();
         let sidebar_mode = self.core.layout.sidebar;
         let colors = palette(cx);
         let measurement_owner = cx.entity().downgrade();
@@ -84,17 +89,25 @@ impl Render for DesktopApp {
                     }
                 },
             ))
-            .children(failure_banner)
-            .when(empty, |main| main.child(self.empty_conversation(cx)))
-            .when(!empty, |main| {
+            .when(archived, |main| main.child(self.archived_session_view(cx)))
+            .when(!archived, |main| main.children(failure_banner))
+            .when(!archived && show_header, |main| {
                 main.child(self.conversation_header(cx))
-                    .child(self.conversation_body(window, cx))
+            })
+            .when(!archived && empty, |main| {
+                main.child(self.empty_conversation(cx))
+            })
+            .when(!archived && !empty, |main| {
+                main.child(self.conversation_body(window, cx))
                     .children(self.approval_card(cx))
                     .child(self.docked_composer(window, cx))
             });
-        let main = if let Some(preview) = self
-            .html_previews
-            .sidebar(&self.core.session_view.conversation.messages, cx)
+        let main = if let Some(preview) = (!archived)
+            .then(|| {
+                self.html_previews
+                    .sidebar(&self.core.session_view.conversation.messages, cx)
+            })
+            .flatten()
         {
             // Reserve chat space even when the left sidebar is at its widest.
             let available = f32::from(window.viewport_size().width)
@@ -165,9 +178,12 @@ impl Render for DesktopApp {
             .children(self.modal_view(window, cx));
         self.html_previews.frame(
             root,
-            self.modal.is_some()
+            archived
+                || self.modal.is_some()
                 || self.core.composer.menu.is_some()
-                || self.core.sidebar.options_open,
+                || self.core.sidebar.options_open
+                || self.relations_hovered
+                || self.relations_open,
         )
     }
 }

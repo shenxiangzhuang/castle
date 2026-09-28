@@ -295,6 +295,9 @@ pub(crate) struct SessionRuntime {
     durable_revision: u64,
     metadata_generation: u64,
     document: SessionDocument,
+    display_document: Option<SessionDocument>,
+    pub(crate) fork_children: Vec<(SessionInfo, kcastle_agent::ForkOrigin)>,
+    edit_command: Option<(InputId, u64, Option<u64>)>,
     view: Arc<SessionView>,
     approvals: ApprovalQueue,
     lifecycle: RuntimeLifecycle,
@@ -308,6 +311,10 @@ pub(crate) struct SessionRuntime {
 }
 
 impl SessionRuntime {
+    #[allow(
+        clippy::expect_used,
+        reason = "selected_path renumbers validated evidence into a contiguous transport sequence"
+    )]
     pub(crate) fn new(
         agent: Agent,
         project_id: String,
@@ -328,12 +335,22 @@ impl SessionRuntime {
                 Some((name, display))
             })
             .collect::<HashMap<_, _>>();
-        let view = Arc::new(SessionView::from_document(
-            &document,
+        let display_document = (document.tree.has_branches()
+            || document.tree.origin.is_some()
+            || document.tree.head() != document.tree.nodes().next_back().map(|node| node.id))
+        .then(|| {
+            document
+                .selected_path(document.tree.head())
+                .expect("validated path")
+        });
+        let fork_children = Session::fork_children(&sessions_dir, &session.id).unwrap_or_default();
+        let mut view = Arc::new(SessionView::from_document(
+            display_document.as_ref().unwrap_or(&document),
             &session.title,
             &tool_schemas,
             None,
         ));
+        Arc::make_mut(&mut view).actual_stats = document.stats();
         Self {
             session,
             project_id,
@@ -347,6 +364,9 @@ impl SessionRuntime {
             durable_revision,
             metadata_generation: 0,
             document,
+            display_document,
+            fork_children,
+            edit_command: None,
             view,
             approvals: ApprovalQueue::default(),
             lifecycle: RuntimeLifecycle::default(),
@@ -504,7 +524,10 @@ impl SessionRuntime {
         model_update: ModelUpdate,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.lifecycle.allows(RuntimeOperation::Configure) || config == self.config {
+        if self.session.is_archived()
+            || !self.lifecycle.allows(RuntimeOperation::Configure)
+            || config == self.config
+        {
             return false;
         }
         if self.session.path.as_os_str().is_empty() {
@@ -605,6 +628,125 @@ impl SessionRuntime {
         true
     }
 
+    pub(crate) fn refresh_fork_children(&mut self, cx: &mut Context<Self>) {
+        match Session::fork_children(&self.sessions_dir, &self.session.id) {
+            Ok(children) if children != self.fork_children => {
+                self.fork_children = children;
+                cx.notify();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.input_error = Some(format!("Could not refresh fork relationships: {error}"))
+            }
+        }
+    }
+
+    pub(crate) fn tree(&self) -> &kcastle_agent::ConversationTree {
+        &self.document.tree
+    }
+
+    pub(crate) fn can_branch(&self) -> bool {
+        !self.session.is_archived()
+            && self.agent.is_some()
+            && self.lifecycle.allows(RuntimeOperation::Configure)
+            && !self.input_action_pending
+            && self
+                .agent
+                .as_ref()
+                .is_some_and(Agent::can_change_conversation)
+            && !self.session.path.as_os_str().is_empty()
+    }
+
+    fn rebuild_display(&mut self) {
+        match self.document.selected_path(self.document.tree.head()) {
+            Ok(display) => {
+                self.view = Arc::new(SessionView::from_document(
+                    &display,
+                    &self.session.title,
+                    &self.tool_schemas,
+                    None,
+                ));
+                Arc::make_mut(&mut self.view).actual_stats = self.document.stats();
+                self.display_document = Some(display);
+            }
+            Err(error) => self.fail_runtime(error.to_string()),
+        }
+    }
+
+    pub(crate) fn submit_edit(
+        &mut self,
+        input: String,
+        target: InputId,
+        revision: u64,
+        head: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<oneshot::Receiver<Result<(), String>>> {
+        if !self.can_branch() || input.trim().is_empty() {
+            return None;
+        }
+        self.edit_command = Some((target, revision, head));
+        let accepted = self.submit(input, window, cx);
+        if accepted.is_none() {
+            self.edit_command = None;
+        }
+        accepted
+    }
+
+    pub(crate) fn fork(
+        &mut self,
+        anchor: u64,
+        target: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Option<oneshot::Receiver<Result<Session, String>>> {
+        if !self.can_branch() {
+            return None;
+        }
+        let agent = self.agent.take()?;
+        let revision = self.durable_revision;
+        let head = self.tree().head();
+        self.lifecycle.begin_configuring();
+        let (sender, receiver) = oneshot::channel();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (agent, receipts, result) = agent
+                .fork_session(
+                    kcastle_agent::SessionId::new(),
+                    anchor,
+                    target,
+                    revision,
+                    head,
+                )
+                .await;
+            let _ = this.update(cx, |runtime, cx| {
+                for receipt in receipts {
+                    runtime.apply_receipt(receipt);
+                }
+                runtime.sync_agent_metadata(&agent);
+                runtime.agent = Some(agent);
+                runtime
+                    .lifecycle
+                    .complete_config(SessionRuntimeStatus::Idle);
+                if let Ok(child) = &result
+                    && let Some(origin) =
+                        child
+                            .events()
+                            .first()
+                            .and_then(|record| match &record.event {
+                                SessionEvent::SessionForked { origin, .. } => Some(origin.clone()),
+                                _ => None,
+                            })
+                {
+                    runtime.fork_children.push((child.info().clone(), origin));
+                }
+                let _ = sender.send(result.map_err(|error| error.to_string()));
+                cx.notify();
+            });
+        })
+        .detach();
+        Some(receiver)
+    }
+
     pub(crate) fn pending_inputs(&self) -> Vec<PendingInput> {
         self.document.pending_inputs()
     }
@@ -615,7 +757,7 @@ impl SessionRuntime {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<oneshot::Receiver<Result<(), String>>> {
-        if input.trim().is_empty() {
+        if self.session.is_archived() || input.trim().is_empty() {
             return None;
         }
         let (ack, accepted) = oneshot::channel();
@@ -778,7 +920,11 @@ impl SessionRuntime {
                 .as_ref()
                 .map(|(id, _)| id.clone())
                 .unwrap_or_else(InputId::random);
-            agent.start_input(id, input)
+            if let Some((target, revision, head)) = self.edit_command.take() {
+                agent.edit_input(id, input, target, revision, head)
+            } else {
+                agent.start_input(id, input)
+            }
         } else {
             agent.resume_pending()
         };
@@ -974,19 +1120,49 @@ impl SessionRuntime {
         let previous_revision = self.document.revisions().conversation;
         let committed_revision = receipt.revision;
         let committed_at_ms = receipt.committed_at_ms;
+        let changed_path = receipt.events.iter().any(|event| {
+            matches!(
+                event.event,
+                SessionEvent::ConversationHeadSelected { .. } | SessionEvent::SessionForked { .. }
+            )
+        });
+        let display_events = self
+            .display_document
+            .as_ref()
+            .map(|_| receipt.events.clone());
         match self.document.apply_batch(receipt.events) {
             Ok(delta) => {
-                if self.document.revisions().conversation != previous_revision {
+                if self.document.revisions().conversation != previous_revision || changed_path {
                     self.transcript_updates = self.transcript_updates.saturating_add(1);
                 }
-                let next_view = Arc::new(SessionView::after_delta(
-                    &self.document,
-                    &delta,
-                    &self.session.title,
-                    &self.tool_schemas,
-                    &self.view,
-                ));
-                self.view = next_view;
+                if changed_path {
+                    self.rebuild_display();
+                } else if let Some(display) = &mut self.display_document {
+                    match display.apply_batch(display_events.unwrap_or_default()) {
+                        Ok(delta) => {
+                            self.view = Arc::new(SessionView::after_delta(
+                                display,
+                                &delta,
+                                &self.session.title,
+                                &self.tool_schemas,
+                                &self.view,
+                            ))
+                        }
+                        Err(error) => {
+                            self.fail_runtime(error.to_string());
+                            return;
+                        }
+                    }
+                } else {
+                    self.view = Arc::new(SessionView::after_delta(
+                        &self.document,
+                        &delta,
+                        &self.session.title,
+                        &self.tool_schemas,
+                        &self.view,
+                    ));
+                }
+                Arc::make_mut(&mut self.view).actual_stats = self.document.stats();
                 self.durable_revision = committed_revision;
                 if committed_at_ms >= 0 {
                     let updated_at = millis_to_seconds(committed_at_ms);
@@ -1015,11 +1191,12 @@ impl SessionRuntime {
 
     fn refresh_view(&mut self) {
         self.view = Arc::new(SessionView::from_document(
-            &self.document,
+            self.display_document.as_ref().unwrap_or(&self.document),
             &self.session.title,
             &self.tool_schemas,
             Some(&self.view),
         ));
+        Arc::make_mut(&mut self.view).actual_stats = self.document.stats();
     }
 
     fn sync_agent_metadata(&mut self, agent: &Agent) {
@@ -1113,6 +1290,50 @@ mod tests {
             SessionDocument::default(),
             config,
         )
+    }
+
+    #[test]
+    fn reopening_selected_linear_prefix_does_not_show_the_physical_tail() {
+        use crate::domain::session_document::tests::{fixture, recorded};
+        for head in [None, Some(1)] {
+            let mut events = fixture();
+            events.push(recorded(
+                events.len() as u64,
+                SessionEvent::ConversationHeadSelected { head },
+            ));
+            let document = SessionDocument::from_events(events).unwrap();
+            assert!(!document.tree.has_branches());
+            let expected = document
+                .selected_path(head)
+                .unwrap()
+                .conversation_ids()
+                .len();
+            let mut empty = runtime();
+            let runtime = SessionRuntime::new(
+                empty.agent.take().unwrap(),
+                "default".into(),
+                PathBuf::from("sessions"),
+                document,
+                SessionConfig::default(),
+            );
+            assert_eq!(runtime.view.conversation.messages.len(), expected);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn archived_runtime_does_not_start_configuration(cx: &mut gpui_kit::TestAppContext) {
+        let runtime = cx.new(|_| {
+            let mut runtime = runtime();
+            runtime.session.path = PathBuf::from("sessions/archive/test.session-v2");
+            runtime
+        });
+        cx.update_entity(&runtime, |runtime, cx| {
+            let mut config = runtime.config.clone();
+            config.allow_all_tools = !config.allow_all_tools;
+            assert!(!runtime.apply_config(config, ModelUpdate::Keep, cx));
+            assert!(!runtime.is_active());
+            assert!(!runtime.can_branch());
+        });
     }
 
     #[gpui_kit::test]

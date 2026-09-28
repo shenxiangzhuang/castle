@@ -18,10 +18,13 @@ use crate::domain::trajectory::{TrajectoryProjection, TrajectoryRecord};
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SessionView {
     pub(crate) conversation: ConversationState,
+    pub(crate) inherited_messages: usize,
     pub(crate) trajectory: TrajectoryProjection,
+    pub(crate) actual_stats: crate::domain::session_document::SessionStats,
     conversation_revision: u64,
     conversation_indices: PersistentHashMap<ConversationItemId, usize>,
     claimed_message_keys: PersistentHashSet<MessageId>,
+    item_ids: PersistentHashMap<MessageId, ConversationItemId>,
     #[cfg(test)]
     materialized_messages: usize,
     #[cfg(test)]
@@ -29,6 +32,10 @@ pub(crate) struct SessionView {
 }
 
 impl SessionView {
+    pub(crate) fn item_id(&self, key: MessageId) -> Option<&ConversationItemId> {
+        self.item_ids.get(&key)
+    }
+
     #[allow(
         clippy::expect_used,
         reason = "conversation ids come from the same canonical document snapshot"
@@ -129,6 +136,18 @@ impl SessionView {
                     .saturating_add(materialized_message_text_bytes_delta)
             });
 
+        let item_ids = if reuse_conversation {
+            previous
+                .map(|view| view.item_ids.clone())
+                .unwrap_or_default()
+        } else {
+            document
+                .conversation_ids()
+                .iter()
+                .zip(messages.iter())
+                .map(|(id, message)| (message.key, id.clone()))
+                .collect()
+        };
         let stats = document.stats();
         let conversation = ConversationState {
             tool_calls: trajectory
@@ -142,10 +161,13 @@ impl SessionView {
         };
         Self {
             conversation,
+            inherited_messages: document.inherited_message_count(),
+            actual_stats: document.stats(),
             trajectory,
             conversation_revision: revisions.conversation,
             conversation_indices,
             claimed_message_keys,
+            item_ids,
             #[cfg(test)]
             materialized_messages,
             #[cfg(test)]
@@ -166,6 +188,7 @@ impl SessionView {
         let mut messages = previous.conversation.messages.clone();
         let mut conversation_indices = previous.conversation_indices.clone();
         let mut claimed_message_keys = previous.claimed_message_keys.clone();
+        let mut item_ids = previous.item_ids.clone();
         let appended = if delta.conversation_order.is_append() {
             appended_conversation_ids(document, previous)
         } else if delta.conversation_order.changed() {
@@ -193,6 +216,7 @@ impl SessionView {
                 materialized_message_text_bytes = materialized_message_text_bytes
                     .saturating_add(projected_message_owned_text_bytes(&message));
             }
+            item_ids.insert(key, id.clone());
             conversation_indices.insert(id.clone(), messages.len());
             messages.push_back(message);
             materialized = materialized.saturating_add(1);
@@ -244,10 +268,13 @@ impl SessionView {
                         .count(),
                 ),
             },
+            inherited_messages: previous.inherited_messages,
+            actual_stats: document.stats(),
             trajectory,
             conversation_revision: revisions.conversation,
             conversation_indices,
             claimed_message_keys,
+            item_ids,
             #[cfg(test)]
             materialized_messages: previous.materialized_messages.saturating_add(materialized),
             #[cfg(test)]

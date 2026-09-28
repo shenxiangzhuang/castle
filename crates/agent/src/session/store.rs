@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -18,11 +18,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const SESSION_DATABASE_FILE: &str = "sessions.sqlite3";
-pub const JSONL_STORE_FORMAT_VERSION: u32 = 3;
+pub const JSONL_STORE_FORMAT_VERSION: u32 = 4;
 // This SQLite store is new in session v2. Earlier development-only revisions never shipped, so
 // the first public on-disk schema starts at version 1.
-const DATABASE_SCHEMA_VERSION: u32 = 1;
-const CATALOG_EXTRACTOR_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: u32 = 2;
+const CATALOG_EXTRACTOR_VERSION: i64 = 2;
 // A catalog row is safe to present only when both its serialized event representation and the
 // state-machine semantics that interpret those events match this binary. Keep the two inputs
 // explicit so either compatibility boundary must deliberately advance the persisted contract.
@@ -514,38 +514,123 @@ impl SessionStore {
         &self,
         request: CreateStoredSession,
     ) -> Result<StoredSessionMetadata, SessionStoreError> {
-        validate_session_id(&request.id)?;
-        validate_nonempty("project ID", &request.project_id)?;
-        let title = normalize_title(&request.title)?;
-        let config = serde_json::to_vec(&request.config)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO sessions (
-                id, project_id, title, config_json, created_at_ms, updated_at_ms,
-                archived_at_ms, revision, next_event_seq
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL, 0, 0)",
-            params![
-                request.id.as_str(),
-                request.project_id,
-                title,
-                config,
-                request.created_at_ms
-            ],
-        )?;
-        let session_key = positive_sql_i64(transaction.last_insert_rowid(), "session key")?;
-        transaction.execute(
-            "INSERT INTO session_catalog_projection (
-                session_key, indexed_revision, extractor_version, loadability_version, valid
-             ) VALUES (?1, 0, ?2, ?3, 1)",
-            params![
-                session_key,
-                CATALOG_EXTRACTOR_VERSION,
-                CATALOG_LOADABILITY_VERSION
-            ],
-        )?;
+        insert_session(&transaction, &request)?;
         transaction.commit()?;
         self.metadata_with_connection(&connection, &request.id)
+    }
+
+    pub(crate) fn create_fork(
+        &self,
+        mut request: CreateStoredSession,
+        source: &SessionId,
+        source_revision: u64,
+        recorded: RecordedEvent,
+        permit: &SessionWriterPermit,
+    ) -> Result<StoredSessionMetadata, SessionStoreError> {
+        self.validate_writer(permit, source)?;
+        let SessionEvent::SessionForked { origin, .. } = &recorded.event else {
+            return Err(SessionStoreError::Invalid("Expected fork seed".into()));
+        };
+        if origin.session_id != *source
+            || origin.revision != source_revision
+            || request.id == *source
+        {
+            return Err(SessionStoreError::Invalid(
+                "Fork origin does not match its source".into(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<Vec<u8>> = transaction.query_row(
+            "SELECT f.origin_json FROM session_fork_origins f JOIN sessions s USING(session_key) WHERE s.id = ?1",
+            params![request.id.as_str()], |row| row.get(0)).optional()?;
+        if let Some(existing) = existing {
+            if serde_json::from_slice::<super::tree::ForkOrigin>(&existing)? != *origin {
+                return Err(SessionStoreError::Invalid(
+                    "Fork operation identity was reused".into(),
+                ));
+            }
+            return self.metadata_with_connection(&transaction, &request.id);
+        }
+        let current = self.metadata_with_connection(&transaction, source)?;
+        if current.revision != source_revision || current.archived_at_ms.is_some() {
+            return Err(SessionStoreError::Invalid(
+                "Source session changed or was archived".into(),
+            ));
+        }
+        let titles = transaction
+            .prepare("SELECT title FROM sessions WHERE project_id = ?1")?
+            .query_map(params![request.project_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<HashSet<_>, _>>()?;
+        request.title = next_fork_title(&current.title, &titles);
+        let key = insert_session(&transaction, &request)?;
+        let digest = request_digest(0, std::slice::from_ref(&recorded))?;
+        let now = now_millis();
+        transaction.execute(
+            "UPDATE sessions SET revision=1, next_event_seq=1 WHERE session_key=?1",
+            params![key],
+        )?;
+        transaction.execute(
+            "INSERT INTO journal_transactions (session_key, revision, tx_id, base_revision,
+            first_event_seq, event_count, clock_id, request_digest, committed_at_ms)
+            VALUES (?1,1,?2,0,0,1,?3,?4,?5)",
+            params![
+                key,
+                recorded.tx_id.as_str(),
+                recorded.time.clock_id,
+                digest,
+                now
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO journal_events (session_key,seq,transaction_revision,ordinal,
+            wall_time_ms,monotonic_ns,event_json) VALUES (?1,0,1,0,?2,?3,?4)",
+            params![
+                key,
+                recorded.time.wall_time_ms,
+                to_sql_i64(recorded.time.monotonic_ns)?,
+                serde_json::to_vec(&recorded.event)?
+            ],
+        )?;
+        update_catalog_projection(&transaction, key, 0, 1, std::slice::from_ref(&recorded))?;
+        #[cfg(test)]
+        if self.consume_failpoint(FAILPOINT_BEFORE_COMMIT) {
+            return Err(SessionStoreError::InjectedBeforeCommit);
+        }
+        transaction.commit()?;
+        #[cfg(test)]
+        if self.consume_failpoint(FAILPOINT_AFTER_COMMIT) {
+            return Err(SessionStoreError::OutcomeUnknown {
+                tx_id: recorded.tx_id,
+            });
+        }
+        self.metadata_with_connection(&connection, &request.id)
+    }
+
+    pub(crate) fn fork_children(
+        &self,
+        source: &SessionId,
+    ) -> Result<Vec<(StoredSessionMetadata, super::tree::ForkOrigin)>, SessionStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT s.id, f.origin_json FROM session_fork_origins f
+            JOIN sessions s USING(session_key) WHERE f.source_id=?1 ORDER BY s.created_at_ms, s.id",
+        )?;
+        let rows = statement
+            .query_map(params![source.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(id, json)| {
+                Ok((
+                    self.metadata_with_connection(&connection, &SessionId::from_raw(id))?,
+                    serde_json::from_slice(&json)?,
+                ))
+            })
+            .collect()
     }
 
     pub fn metadata(
@@ -1439,6 +1524,33 @@ fn update_catalog_projection(
     drop(delete_request_drafts);
     drop(insert_draft);
     drop(insert_fragment);
+    if events.iter().any(|event| {
+        matches!(
+            event.event,
+            SessionEvent::ConversationHeadSelected { .. }
+                | SessionEvent::SessionForked { .. }
+                | SessionEvent::InputCancelled { .. }
+        )
+    }) {
+        rebuild_tree_search(
+            transaction,
+            session_key,
+            events.last().map_or(0, |event| event.seq),
+        )?;
+    }
+    for event in events {
+        if let SessionEvent::SessionForked { origin, .. } = &event.event {
+            transaction.execute(
+                "INSERT INTO session_fork_origins (session_key,source_id,origin_json)
+                VALUES (?1,?2,?3)",
+                params![
+                    session_key,
+                    origin.session_id.as_str(),
+                    serde_json::to_vec(origin)?
+                ],
+            )?;
+        }
+    }
 
     let changed = transaction.execute(
         "UPDATE session_catalog_projection
@@ -1813,6 +1925,19 @@ fn validate_nonempty(label: &str, value: &str) -> Result<(), SessionStoreError> 
     }
 }
 
+fn next_fork_title(source: &str, titles: &HashSet<String>) -> String {
+    let mut number = 1usize;
+    loop {
+        let suffix = format!(" ({number})");
+        let prefix: String = source.chars().take(80 - suffix.len()).collect();
+        let title = format!("{}{suffix}", prefix.trim_end());
+        if !titles.contains(&title) {
+            return title;
+        }
+        number += 1;
+    }
+}
+
 fn normalize_title(title: &str) -> Result<String, SessionStoreError> {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = title.chars().take(80).collect::<String>();
@@ -1947,6 +2072,153 @@ enum JsonlExportRecord<'a> {
     },
 }
 
+fn rebuild_tree_search(
+    transaction: &rusqlite::Transaction<'_>,
+    key: i64,
+    seq: u64,
+) -> Result<(), SessionStoreError> {
+    let mut statement = transaction
+        .prepare("SELECT seq, event_json FROM journal_events WHERE session_key=?1 ORDER BY seq")?;
+    let records = statement
+        .query_map(params![key], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut tree = super::tree::ConversationTree::default();
+    let mut pending = std::collections::BTreeMap::new();
+    for (seq, json) in records {
+        let event: SessionEvent = serde_json::from_slice(&json)?;
+        match &event {
+            SessionEvent::InputSubmitted {
+                input_id, input, ..
+            } => {
+                pending.insert(input_id.clone(), input.clone());
+            }
+            SessionEvent::InputAttached { input_id, .. }
+            | SessionEvent::InputCancelled { input_id } => {
+                pending.remove(input_id);
+            }
+            _ => {}
+        }
+        tree.observe(&RecordedEvent {
+            seq: from_sql_u64(seq, "event sequence")?,
+            tx_id: "search".into(),
+            time: EventTime {
+                wall_time_ms: 0,
+                clock_id: "search".into(),
+                monotonic_ns: 0,
+            },
+            event,
+        });
+    }
+    transaction.execute(
+        "DELETE FROM session_search_fragments WHERE session_key=?1",
+        params![key],
+    )?;
+    let path = tree.path_events(tree.head());
+    let completed: std::collections::HashSet<_> = path
+        .iter()
+        .filter_map(|record| match &record.event {
+            SessionEvent::AssistantCompleted { request_id, .. } => Some(request_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut values: Vec<(String, Option<String>)> = Vec::new();
+    for event in path {
+        let value = match event.event {
+            SessionEvent::InputSubmitted { input, .. } => Some(input),
+            SessionEvent::AssistantCompleted { items, .. } => Some(serde_json::to_string(&items)?),
+            SessionEvent::ToolResultAttached { item, .. } => Some(serde_json::to_string(&item)?),
+            SessionEvent::CompactionFinished { summary, .. } => summary,
+            SessionEvent::ModelRequestFailed { error, .. }
+            | SessionEvent::RunTerminated {
+                error: Some(error), ..
+            }
+            | SessionEvent::StepTerminated {
+                error: Some(error), ..
+            } => Some(error),
+            SessionEvent::AssistantChunk { request_id, chunk }
+                if !completed.contains(&request_id) =>
+            {
+                let texts = match chunk {
+                    AssistantChunk::OutputTextDelta { delta }
+                    | AssistantChunk::ReasoningTextDelta { delta } => vec![delta],
+                    AssistantChunk::ToolCallDelta {
+                        name,
+                        arguments_delta,
+                        ..
+                    } => name
+                        .into_iter()
+                        .chain(std::iter::once(arguments_delta))
+                        .collect(),
+                    AssistantChunk::Usage { .. } => Vec::new(),
+                };
+                values.extend(
+                    texts
+                        .into_iter()
+                        .map(|text| (text, Some(request_id.as_str().to_owned()))),
+                );
+                None
+            }
+            _ => None,
+        };
+        if let Some(value) = value {
+            values.push((value, None));
+        }
+    }
+    values.extend(pending.into_values().map(|value| (value, None)));
+    for (ordinal, (value, draft)) in values.iter().enumerate() {
+        if value.trim().is_empty() {
+            continue;
+        }
+        transaction.execute(
+            "INSERT INTO session_search_fragments (session_key,event_seq,ordinal,value)
+            VALUES (?1,?2,?3,?4)",
+            params![key, to_sql_i64(seq)?, ordinal as i64, value],
+        )?;
+        if let Some(request) = draft {
+            transaction.execute("INSERT INTO session_request_draft_fragments (session_key,request_id,event_seq,ordinal)
+                VALUES (?1,?2,?3,?4)", params![key, request, to_sql_i64(seq)?, ordinal as i64])?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_session(
+    transaction: &rusqlite::Transaction<'_>,
+    request: &CreateStoredSession,
+) -> Result<i64, SessionStoreError> {
+    validate_session_id(&request.id)?;
+    validate_nonempty("project ID", &request.project_id)?;
+    let title = normalize_title(&request.title)?;
+    let config = serde_json::to_vec(&request.config)?;
+    transaction.execute(
+        "INSERT INTO sessions (
+                id, project_id, title, config_json, created_at_ms, updated_at_ms,
+                archived_at_ms, revision, next_event_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL, 0, 0)",
+        params![
+            request.id.as_str(),
+            request.project_id,
+            title,
+            config,
+            request.created_at_ms
+        ],
+    )?;
+    let session_key = positive_sql_i64(transaction.last_insert_rowid(), "session key")?;
+    transaction.execute(
+        "INSERT INTO session_catalog_projection (
+                session_key, indexed_revision, extractor_version, loadability_version, valid
+             ) VALUES (?1, 0, ?2, ?3, 1)",
+        params![
+            session_key,
+            CATALOG_EXTRACTOR_VERSION,
+            CATALOG_LOADABILITY_VERSION
+        ],
+    )?;
+    Ok(session_key)
+}
+
 fn write_json_line(
     writer: &mut impl Write,
     value: &impl Serialize,
@@ -1960,6 +2232,25 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Sess
     let found = schema_version(connection)?;
     match found {
         version if version == i64::from(DATABASE_SCHEMA_VERSION) => Ok(()),
+        1 => {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(FORK_SCHEMA)?;
+            // V1 contains only linear histories, whose existing search projection is unchanged.
+            // Advance only the precisely supported old contract; never bless unknown rows.
+            transaction.execute(
+                "UPDATE session_catalog_projection SET extractor_version=?1,
+                loadability_version=?2 WHERE extractor_version=1 AND loadability_version=?3",
+                params![
+                    CATALOG_EXTRACTOR_VERSION,
+                    CATALOG_LOADABILITY_VERSION,
+                    (3_i64 << 32) | 1
+                ],
+            )?;
+            transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            Ok(())
+        }
         0 => {
             let user_table_count = connection.query_row(
                 "SELECT count(*)
@@ -1974,6 +2265,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Sess
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(SCHEMA)?;
+            transaction.execute_batch(FORK_SCHEMA)?;
             transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
             transaction.commit()?;
             Ok(())
@@ -2001,6 +2293,15 @@ fn unsupported_schema_version(found: i64) -> SessionStoreError {
         expected: DATABASE_SCHEMA_VERSION,
     }
 }
+
+const FORK_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS session_fork_origins (
+    session_key INTEGER PRIMARY KEY REFERENCES sessions(session_key) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    origin_json BLOB NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS session_fork_source ON session_fork_origins(source_id);
+"#;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -2153,7 +2454,7 @@ mod tests {
         AppendFailpoint, AppendTx, ArchiveFilter, CATALOG_EXTRACTOR_VERSION,
         CATALOG_LOADABILITY_VERSION, CreateStoredSession, DATABASE_SCHEMA_VERSION, MetadataUpdate,
         SESSION_DATABASE_FILE, SessionErrorClass, SessionStore, SessionStoreError, TransactionId,
-        validate_retry_matches, writer_lock_file_name,
+        next_fork_title, validate_retry_matches, writer_lock_file_name,
     };
     use crate::session::event::{
         AssistantChunk, EventDraft, EventTime, InputId, InputOrigin, RecordedEvent, RequestId,
@@ -2164,9 +2465,25 @@ mod tests {
     use async_openai::types::responses::{EasyInputMessage, InputItem};
     use proptest::prelude::*;
     use rusqlite::{Connection, params};
+    use std::collections::HashSet;
     use std::fs::{File, OpenOptions, TryLockError};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn fork_titles_reserve_suffix_space_and_preserve_source_names() {
+        let source = "题".repeat(80);
+        let first = next_fork_title(&source, &HashSet::new());
+        assert_eq!(first.chars().count(), 80);
+        assert!(first.ends_with(" (1)"));
+        let second = next_fork_title(&source, &HashSet::from([first]));
+        assert_eq!(second.chars().count(), 80);
+        assert!(second.ends_with(" (2)"));
+        assert_eq!(
+            next_fork_title("Plan (2026)", &HashSet::new()),
+            "Plan (2026) (1)"
+        );
+    }
 
     #[test]
     fn in_memory_store_obeys_append_contract() {
@@ -2193,6 +2510,45 @@ mod tests {
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
         run_append_contract(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn schema_one_migrates_without_rewriting_journal() {
+        let directory = test_directory("tree-schema-upgrade");
+        let database = directory.join(SESSION_DATABASE_FILE);
+        let store = SessionStore::open_project(&directory).unwrap();
+        let session = create_session(&store, "legacy");
+        let permit = store.acquire_writer(&session.id).unwrap();
+        let receipt = store
+            .append(
+                &append_request(&session.id, "legacy-tx", 0, two_events()),
+                &permit,
+            )
+            .unwrap();
+        {
+            let connection = store.connection().unwrap();
+            connection
+                .execute_batch("DROP TABLE session_fork_origins; PRAGMA user_version=1;")
+                .unwrap();
+            connection.execute("UPDATE session_catalog_projection SET extractor_version=1,loadability_version=?1", params![(3_i64 << 32) | 1]).unwrap();
+        }
+        drop(permit);
+        drop(store);
+        let migrated = SessionStore::open_database(&database).unwrap();
+        assert_eq!(
+            migrated.load(&session.id).unwrap().transactions,
+            vec![receipt]
+        );
+        assert!(migrated.fork_children(&session.id).unwrap().is_empty());
+        assert_eq!(
+            migrated
+                .catalog("project", ArchiveFilter::Active)
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(migrated);
         std::fs::remove_dir_all(directory).unwrap();
     }
 

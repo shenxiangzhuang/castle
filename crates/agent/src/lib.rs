@@ -36,3 +36,7 @@ pub use session::{
     SessionInfo, SessionModelConfig, SessionSnapshot, validate_events,
 };
 pub use tools::{AgentTool, Env, ShellTool, ToolResult};
+
+pub use session::tree::{
+    ConversationNode, ConversationNodeId, ConversationNodeKind, ConversationTree, ForkOrigin,
+};

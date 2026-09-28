@@ -1,6 +1,6 @@
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{Icon, IconName, Selectable, Sizable};
+use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable};
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, accesskit::Role as AxRole, div,
@@ -19,6 +19,76 @@ use crate::ui_theme::{TrajectoryPalette, metrics, palette, trajectory_palette};
 mod performance;
 
 impl DesktopApp {
+    pub(crate) fn archived_session_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
+        div()
+            .id("archived-session")
+            .when(cfg!(test), |view| {
+                view.debug_selector(|| "archived-session".into())
+            })
+            .flex()
+            .flex_col()
+            .flex_1()
+            .w_full()
+            .items_center()
+            .justify_center()
+            .gap(px(12.0))
+            .child(
+                Icon::new(crate::assets::DesktopIconName::Archive)
+                    .size(px(32.0))
+                    .mb(px(12.0))
+                    .text_color(colors.muted_text),
+            )
+            .child(div().text_size(px(20.0)).child("This task is archived"))
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .text_color(colors.muted_text)
+                    .child("Unarchive this task to open it"),
+            )
+            .child(
+                Button::new("unarchive-and-open")
+                    .when(cfg!(test), |button| {
+                        button.debug_selector(|| "unarchive-and-open".into())
+                    })
+                    .label("Unarchive and open")
+                    .disabled(self.selection_pending())
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(colors.text)
+                            .foreground(colors.canvas)
+                            .hover(colors.text.opacity(0.85))
+                            .active(colors.text.opacity(0.75)),
+                    )
+                    .when(!self.selection_pending(), |button| button.bg(colors.text))
+                    .rounded_full()
+                    .h(px(32.0))
+                    .px(px(14.0))
+                    .mt(px(4.0))
+                    .on_click(cx.listener(|app, _, window, cx| {
+                        let session = app.selected_runtime.read(cx).snapshot().session.clone();
+                        if let Some(restored) = app.restore_archived_session(
+                            app.core.workspace.active_project,
+                            session,
+                            cx,
+                        ) {
+                            app.open_session(restored.path, window, cx);
+                        }
+                    })),
+            )
+            .children(self.core.transient_messages.back().map(|notice| {
+                div()
+                    .id("archive-notice")
+                    .role(AxRole::Status)
+                    .max_w(px(480.0))
+                    .px(px(20.0))
+                    .text_center()
+                    .text_size(px(13.0))
+                    .text_color(colors.muted_text)
+                    .child(notice.text.clone())
+            }))
+    }
+
     pub(crate) fn conversation_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let trajectory_colors = trajectory_palette(cx);
@@ -59,6 +129,7 @@ impl DesktopApp {
                                     .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(conversation_view_model(&self.core).title.to_owned()),
                             )
+                            .children(self.session_relations_icon(cx))
                             .children(self.session_running().then(|| {
                                 div()
                                     .flex()
@@ -101,6 +172,54 @@ impl DesktopApp {
                         show_trajectory,
                     )),
             )
+    }
+
+    pub(crate) fn continued_from_chat(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let origin = self.selected_runtime.read(cx).tree().origin.as_ref()?;
+        let parent = self.session_relation_info(&origin.session_id)?;
+        let path = parent.path.clone();
+        let colors = palette(cx);
+        let rule = || div().flex_1().h(px(1.0)).bg(colors.border);
+        Some(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .py(px(20.0))
+                .child(rule())
+                .child(
+                    Button::new("continued-from-chat")
+                        .when(cfg!(test), |button| {
+                            button.debug_selector(|| "continued-from-chat".into())
+                        })
+                        .accessibility_label(format!("Continued from chat: {}", parent.title))
+                        .tooltip(parent.title.clone())
+                        .text()
+                        .small()
+                        .h(px(24.0))
+                        .child(
+                            Icon::new(crate::assets::DesktopIconName::Branches)
+                                .size(px(14.0))
+                                .text_color(colors.muted_text),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(gpui_kit::FontWeight::NORMAL)
+                                .text_color(colors.markdown_link)
+                                .child("Continued from chat"),
+                        )
+                        .on_click(cx.listener(move |app, _, window, cx| {
+                            app.open_session(path.clone(), window, cx)
+                        })),
+                )
+                .child(rule())
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn conversation_body(
@@ -326,13 +445,36 @@ impl DesktopApp {
         } else {
             self.message_view(row.message_index, &row.message, window, cx)
         };
+        let inherited = self.core.session_view.inherited_messages;
+        let last_inherited_chunk = inherited > 0
+            && row.message_index + 1 == inherited
+            && self
+                .chat
+                .borrow()
+                .rows
+                .get(index + 1)
+                .is_none_or(|next| next.key.message != row.key.message);
         div()
+            .relative()
             .id(gpui_kit::SharedString::from(format!(
                 "chat-row-{}-{}-{}",
                 row.key.message, row.key.field, row.key.start
             )))
             .w_full()
-            .child(transcript_content_column(self.core.layout.content_max_width).child(body))
+            .child(
+                transcript_content_column(self.core.layout.content_max_width)
+                    .children(
+                        (inherited == 0 && index == 0)
+                            .then(|| self.continued_from_chat(cx))
+                            .flatten(),
+                    )
+                    .child(body)
+                    .children(
+                        last_inherited_chunk
+                            .then(|| self.continued_from_chat(cx))
+                            .flatten(),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -387,7 +529,24 @@ impl DesktopApp {
                                     .text_color(colors.muted_text)
                                     .child(message_time_label(message)),
                             )
-                            .child(copy_message_button("copy-user", index, message, cx)),
+                            .child(copy_message_button("copy-user", index, message, cx))
+                            .child(
+                                Button::new(("edit-message", index))
+                                    .when(cfg!(test), |button| {
+                                        button.debug_selector(|| "edit-user-message".into())
+                                    })
+                                    .icon(crate::assets::DesktopIconName::SquarePen)
+                                    .ghost()
+                                    .compact()
+                                    .tooltip("Edit message")
+                                    .disabled(!self.can_edit_message(message.key, cx))
+                                    .on_click({
+                                        let key = message.key;
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.edit_message(key, window, cx)
+                                        })
+                                    }),
+                            ),
                     )
                     .into_any_element(),
                 Role::Assistant => div()
@@ -406,6 +565,23 @@ impl DesktopApp {
                             .h(px(28.0))
                             .gap(px(10.0))
                             .child(copy_message_button("copy-assistant", index, message, cx))
+                            .child(
+                                Button::new(("fork-assistant", index))
+                                    .when(cfg!(test), |button| {
+                                        button.debug_selector(|| "fork-assistant-message".into())
+                                    })
+                                    .icon(crate::assets::DesktopIconName::Branches)
+                                    .ghost()
+                                    .compact()
+                                    .tooltip("Fork after this response")
+                                    .disabled(!self.can_fork_message(message.key, cx))
+                                    .on_click({
+                                        let key = message.key;
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.fork_message(key, window, cx)
+                                        })
+                                    }),
+                            )
                             .child(
                                 Button::new(("good-response", index))
                                     .icon(IconName::ThumbsUp)

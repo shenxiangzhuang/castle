@@ -44,6 +44,7 @@ impl DesktopApp {
                     .w_full()
                     .max_w(px(self.core.layout.composer_max_width))
                     .gap_3()
+                    .children(self.continued_from_chat(cx))
                     .when(view.show_intro, |hero| {
                         hero.child(
                             div()
@@ -104,7 +105,12 @@ impl DesktopApp {
     ) -> impl IntoElement {
         let colors = palette(cx);
         let status = composer_status(&self.core);
-        let full_status = status.clone();
+        let history = self.core.session_view.trajectory.stats();
+        let full_status = format!(
+            "Session total: {status}. Selected path (including inherited history): {} input tokens, {} output tokens.",
+            history.input_tokens(),
+            history.total_output_tokens()
+        );
         let shaped_status: SharedString = status.clone().into();
         let style = window.text_style();
         let status_width = window
@@ -153,6 +159,12 @@ impl DesktopApp {
         let preparing = selection_pending || matches!(self.core.run, RunState::Preparing);
         let empty = self.input.read(cx).value().trim().is_empty();
         let runtime = self.selected_runtime.read(cx);
+        let archived = runtime.snapshot().session.is_archived();
+        let editing = self.edit_draft.is_some();
+        let unchanged = self
+            .edit_draft
+            .as_ref()
+            .is_some_and(|edit| edit.original.trim() == self.input.read(cx).value().trim());
         let pending_inputs = runtime.pending_inputs();
         let input_action_pending = runtime.input_action_pending;
         let input_error = runtime.input_error.clone();
@@ -244,6 +256,12 @@ impl DesktopApp {
                             })))
                 )
             })
+            .when(editing, |card| card.child(div().px_3().py_2().flex().items_center().justify_between()
+                .text_sm().gap_2().child(div().flex_1().min_w_0().child("Editing message · Creates a branch")
+                    .child(div().text_xs().child("Workspace files are unchanged")))
+                .child(Button::new("cancel-message-edit").label("Cancel").ghost().compact()
+                    .disabled(self.composer_submitting)
+                    .on_click(cx.listener(|this, _, window, cx| this.cancel_edit(window, cx))))))
             .when_some(input_error, |card, error| card.child(div().px_3().py_2().text_sm().child(error)))
             .child(
                 div()
@@ -260,6 +278,7 @@ impl DesktopApp {
                     }))
                     .child(
                         Textarea::new(&self.input)
+                            .disabled(editing && self.composer_submitting)
                             .aria_label("Message the agent")
                             .appearance(false)
                             .bordered(false)
@@ -271,6 +290,7 @@ impl DesktopApp {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .flex_wrap()
                     .gap_3()
                     .px_2()
                     .pb(px(metrics::COMPOSER_CONTROLS_BOTTOM_INSET))
@@ -383,9 +403,9 @@ impl DesktopApp {
                                     .icon(IconName::ArrowUp)
                                     .primary()
                                     .loading(preparing || self.composer_submitting)
-                                    .disabled(empty || preparing || self.composer_submitting || !model_configured)
+                                    .disabled(empty || preparing || self.composer_submitting || !model_configured || archived || unchanged)
                                     .rounded(px(999.0))
-                                    .tooltip(if running { "Send after the current task" } else { "Send message" })
+                                    .tooltip(if editing { "Save & resend" } else if running { "Send after the current task" } else { "Send message" })
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.submit(window, cx)),
                                     )
@@ -395,7 +415,7 @@ impl DesktopApp {
             )
     }
 
-    fn composer_menu_trigger(
+    pub(crate) fn composer_menu_trigger(
         &self,
         kind: ComposerMenu,
         button: Button,

@@ -6,6 +6,7 @@ use std::sync::Arc;
 pub(crate) mod event;
 pub(crate) mod machine;
 pub(crate) mod store;
+pub(crate) mod tree;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -121,6 +122,14 @@ pub struct SessionInfo {
     pub title: String,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+impl SessionInfo {
+    pub fn is_archived(&self) -> bool {
+        self.path
+            .parent()
+            .is_some_and(|path| path.ends_with(ARCHIVE_DIRECTORY))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -395,7 +404,7 @@ impl Session {
         Self::from_loaded(store, loaded, path)
     }
 
-    fn from_loaded(
+    pub(crate) fn from_loaded(
         store: SessionStore,
         loaded: LoadedSession,
         path: PathBuf,
@@ -421,6 +430,26 @@ impl Session {
         })
     }
 
+    pub fn fork_children(
+        directory: impl AsRef<Path>,
+        source: &SessionId,
+    ) -> Result<Vec<(SessionInfo, tree::ForkOrigin)>, SessionError> {
+        let directory = canonical_session_directory(directory.as_ref());
+        let database = directory.join(SESSION_DATABASE_FILE);
+        if !database.is_file() {
+            return Ok(Vec::new());
+        }
+        let store = SessionStore::open_database_readonly(database)?;
+        store
+            .fork_children(source)?
+            .into_iter()
+            .map(|(metadata, origin)| {
+                let path = locator(&directory, &metadata.id, metadata.archived_at_ms.is_some());
+                Ok((info_from_metadata(path, &metadata), origin))
+            })
+            .collect()
+    }
+
     pub fn list(directory: impl AsRef<Path>) -> Result<Vec<SessionInfo>, SessionError> {
         Ok(Self::catalog(directory)?.sessions)
     }
@@ -442,7 +471,13 @@ impl Session {
         if !database.is_file() {
             return Ok(SessionCatalog::default());
         }
-        let store = SessionStore::open_database_readonly(database)?;
+        let store = match SessionStore::open_database_readonly(&database) {
+            Err(store::SessionStoreError::UnsupportedSchemaVersion { found: 1, .. }) => {
+                drop(SessionStore::open_database(&database)?);
+                SessionStore::open_database_readonly(database)?
+            }
+            result => result?,
+        };
         let filter = if archived {
             ArchiveFilter::Archived
         } else {
@@ -591,7 +626,7 @@ fn validated_locator(session: &SessionInfo) -> Result<(PathBuf, SessionId), Sess
     Ok((directory, id))
 }
 
-fn locator(directory: &Path, id: &SessionId, archived: bool) -> PathBuf {
+pub(crate) fn locator(directory: &Path, id: &SessionId, archived: bool) -> PathBuf {
     let directory = if archived {
         directory.join(ARCHIVE_DIRECTORY)
     } else {

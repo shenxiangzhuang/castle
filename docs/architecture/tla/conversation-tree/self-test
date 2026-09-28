@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+expect_violation() {
+    local name=$1 fault=$2 invariant=$3 result=0
+    cat > "$name.cfg" <<CFG
+CONSTANTS
+    MaxNodes = 3
+    MaxTransactions = 3
+    Fault = "$fault"
+SPECIFICATION Spec
+INVARIANT $invariant
+CHECK_DEADLOCK FALSE
+CFG
+    run_tlc "$name" > "$name.log" 2>&1 || result=$?
+    if [[ $result -ne 12 ]] || ! grep -Fq "Invariant $invariant is violated." "$name.log"; then
+        cat "$name.log"
+        echo "FAIL: $name did not violate $invariant" >&2
+        exit 1
+    fi
+    echo "PASS: $name violated $invariant as expected"
+}
+expect_violation bad-parent bad-parent Acyclic
+expect_violation early-publish early-publish CommittedVisibility
+expect_violation duplicate-fork duplicate-fork ForkIdempotent
+expect_violation sibling-leak sibling-leak PathIsolation
+expect_violation edit-reachable none NoEditReachable
+expect_violation fork-reachable none NoForkReachable

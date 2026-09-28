@@ -14,6 +14,7 @@ use gpui_kit::{AssetSource, Result, SharedString};
 const SQUARE_PEN_PATH: &str = "icons/square-pen.svg";
 const DOWNLOAD_PATH: &str = "icons/download.svg";
 const ARCHIVE_PATH: &str = "icons/archive.svg";
+const BRANCHES_PATH: &str = "icons/branches.svg";
 const CLOCK_PATH: &str = "icons/clock.svg";
 static GENERATED_ASSETS: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 static NEXT_GENERATED_ASSET: AtomicU64 = AtomicU64::new(0);
@@ -79,9 +80,29 @@ impl AssetSource for DesktopAssets {
                 "../assets/icons/archive.svg"
             ))));
         }
+        if path == BRANCHES_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/branches.svg"
+            ))));
+        }
         if path == CLOCK_PATH {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/clock.svg"
+            ))));
+        }
+        if path == "icons/session-parents.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/session-parents.svg"
+            ))));
+        }
+        if path == "icons/session-children.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/session-children.svg"
+            ))));
+        }
+        if path == "icons/session-relations.svg" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/session-relations.svg"
             ))));
         }
         ComponentAssets.load(path)
@@ -98,8 +119,20 @@ impl AssetSource for DesktopAssets {
         if ARCHIVE_PATH.starts_with(path) {
             assets.push(ARCHIVE_PATH.into());
         }
+        if BRANCHES_PATH.starts_with(path) {
+            assets.push(BRANCHES_PATH.into());
+        }
         if CLOCK_PATH.starts_with(path) {
             assets.push(CLOCK_PATH.into());
+        }
+        if "icons/session-parents.svg".starts_with(path) {
+            assets.push("icons/session-parents.svg".into());
+        }
+        if "icons/session-children.svg".starts_with(path) {
+            assets.push("icons/session-children.svg".into());
+        }
+        if "icons/session-relations.svg".starts_with(path) {
+            assets.push("icons/session-relations.svg".into());
         }
         Ok(assets)
     }
@@ -107,6 +140,10 @@ impl AssetSource for DesktopAssets {
 
 #[derive(Clone, Copy)]
 pub(crate) enum DesktopIconName {
+    Branches,
+    SessionParents,
+    SessionChildren,
+    SessionRelations,
     Archive,
     Clock,
     Download,
@@ -116,6 +153,10 @@ pub(crate) enum DesktopIconName {
 impl IconNamed for DesktopIconName {
     fn path(self) -> SharedString {
         match self {
+            Self::SessionParents => "icons/session-parents.svg",
+            Self::SessionChildren => "icons/session-children.svg",
+            Self::SessionRelations => "icons/session-relations.svg",
+            Self::Branches => BRANCHES_PATH,
             Self::Archive => ARCHIVE_PATH,
             Self::Clock => CLOCK_PATH,
             Self::Download => DOWNLOAD_PATH,

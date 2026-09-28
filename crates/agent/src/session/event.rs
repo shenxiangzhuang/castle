@@ -10,7 +10,7 @@ use crate::context::ResponseMetadata;
 use crate::model::ReasoningEffort;
 use crate::session::SessionConfig;
 
-pub const SESSION_FORMAT_VERSION: u32 = 3;
+pub const SESSION_FORMAT_VERSION: u32 = 4;
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -174,6 +174,13 @@ impl ResponseInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
+    ConversationHeadSelected {
+        head: Option<super::tree::ConversationNodeId>,
+    },
+    SessionForked {
+        origin: super::tree::ForkOrigin,
+        events: Vec<RecordedEvent>,
+    },
     RunStarted {
         run_id: RunId,
     },

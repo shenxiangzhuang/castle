@@ -8,8 +8,6 @@
     )
 )]
 
-mod agent;
-mod agent_loop;
 use ::agent::context;
 mod model;
 mod session;
@@ -17,9 +15,6 @@ mod tools;
 
 pub use async_openai::types::responses::{EasyInputMessage, InputItem};
 
-pub(crate) use agent::Agent;
-pub(crate) use agent_loop::{ActiveAgent, AgentEvent};
-pub use agent_loop::{AgentError, RunFailure, RunSummary};
 pub use context::compaction::CompactionConfig;
 pub use model::{Model, ReasoningEffort};
 pub use session::event::{
@@ -42,9 +37,11 @@ pub use session::tree::{
     ConversationNode, ConversationNodeId, ConversationNodeKind, ConversationTree, ForkOrigin,
 };
 
-pub mod agent_config;
 pub mod app_store;
-mod host;
+pub mod config;
 pub mod project;
-pub mod settings;
-pub use host::*;
+mod runtime;
+pub use runtime::{
+    AgentError, CommandResult, Harness, RunFailure, RunSummary, RuntimeSnapshot, RuntimeStatus,
+    SessionCommand, SessionConnection, SessionHandle, SessionSetup, SessionUpdate, SubmitMode,
+};

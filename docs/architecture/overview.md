@@ -21,11 +21,37 @@ SDK 的“静态”指不绑定环境。审批合法性由 SDK 校验，策略�
 每个 session 的运行只能持有一个 writer capability，跨 handle 和进程的冲突由存储写入权限拒绝。
 内部 `Agent` 在空闲 owner 与执行任务间转移所有权；没有共享可变状态或第二个领域校验器。
 
+## 层内模块
+
+目录按职责归属组织，纯计算与执行/渲染边界在模块内保持。模块入口只重导出必要接口；
+实现默认私有，内部协作用 `pub(super)` 或 `pub(in ...)`，不使用通配重导出扩张公共 API。
+
+| 层 | 模块 | 职责 |
+| --- | --- | --- |
+| SDK | `session/{event,machine,transition,tree}` | 事件、校验/重放、候选转换、会话树 |
+| SDK | `context` | 上下文构造与压缩规划 |
+| Harness | `runtime/{protocol,handle,owner}` | 客户端契约、连接与关闭、唯一命令 owner |
+| Harness | `runtime/execution/{model,tools,commit,compaction,control}` | 同一执行 owner 的内部实现；提交与恢复集中在 `commit` |
+| Harness | `session/store`、`model`、`tools` | 会话存储、具体模型连接与工具实现 |
+| Harness | `config`、`project`、`app_store` | 共享产品配置、项目目录与应用数据 |
+| Desktop | `bootstrap`、`app` | 启动/退出、窗口状态、跨功能导航与命令转发 |
+| Desktop | `session` | Harness 连接和唯一会话展示投影，供 Chat / Trajectory 共用 |
+| Desktop | `chat`、`trajectory`、`workspace`、`settings` | 各功能的界面、交互与局部展示实现 |
+| Desktop | `rendering`、`platform` | 共享渲染原语、操作系统集成 |
+
+Harness 的可变执行上下文与控制能力只在 `runtime` 子树可见。Desktop 直接通过
+`harness::config` 等入口读取共享配置，不设置同名转发文件。
+Desktop 的 GPUI window entity 仍是 `DesktopApp`：功能文件中的 `impl DesktopApp` 是同一实体的
+界面实现，不代表独立服务或独立生命周期。`app/connections` 保留跨会话选择与连接缓存协调；
+本次结构整理不拆分 Entity、任务、订阅或重新分配可变状态。
+`rendering` 不依赖功能模块或 `DesktopApp`，HTML 预览因参与聊天命令和窗口交互而属于 `chat`。
+纯投影、布局、公共渲染与 crate 依赖边界由 Desktop 的 `architecture_tests.rs` 检查。
+
 ## Public API
 
 ### SDK：状态与输入产生候选转换
 
-入口见 [run.rs](../../crates/agent/src/run.rs) 和 [machine.rs](../../crates/agent/src/session/machine.rs)。
+入口见 [transition.rs](../../crates/agent/src/session/transition.rs) 和 [machine.rs](../../crates/agent/src/session/machine.rs)。
 时间和关联 ID 由宿主提供，转换不读取时钟、不执行 I/O：
 
 ```rust
@@ -52,7 +78,7 @@ match effect {
 
 ### Harness：命令产生事实，连接提供快照
 
-入口见 [host.rs](../../crates/harness/src/host.rs)。构造和连接是普通方法，修改行为是类型化命令：
+入口见 [runtime.rs](../../crates/harness/src/runtime.rs)。构造和连接是普通方法，修改行为是类型化命令：
 
 ```rust
 let harness = Harness::default();
@@ -90,7 +116,7 @@ loop {
 harness.shutdown().await;
 ```
 
-GPUI `SessionRuntime` 只保留展示文档、观察任务和等待确认的交互状态。输入确认与当前选中的会话无关。
+GPUI `SessionConnection` 只保留展示文档、观察任务和等待确认的交互状态。输入确认与当前选中的会话无关。
 `Harness` 持有应用级取消和任务跟踪；应用的 Quit 动作先等待收尾再调用平台退出。
 系统终止通知也会触发关闭回调，但受 GPUI 的 200 ms 退出期限约束；强制终止仍依赖 journal 恢复。
 
@@ -123,7 +149,7 @@ GPUI `SessionRuntime` 只保留展示文档、观察任务和等待确认的交�
 发布工作流只构建 desktop 资产。SQLite schema 3 从 schema 1/2 原地增加命令账本，不改写事件历史。
 不同时更换模型协议、工具实现或会话事件格式。代码减少来自删除 UI 重复协调，不以总行数为验收标准。
 
-无 GPUI 的 [harness 客户端测试](../../crates/harness/src/host/tests.rs) 覆盖提交、审批、取消、恢复、
+无 GPUI 的 [harness 客户端测试](../../crates/harness/src/runtime/tests.rs) 覆盖提交、审批、取消、恢复、
 断连、溢出重连、失败配置、重开去重和 shutdown；既有 journal/工具/展示回归继续运行。
 [TLA+ harness 模型](tla/harness-connection/README.md) 检查命令预留、快照边界、溢出和 join 安全性；
 模型通过不等于证明 Rust 实现正确。

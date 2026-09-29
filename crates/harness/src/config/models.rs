@@ -1,0 +1,165 @@
+use crate::{Model, ReasoningEffort, SessionModelConfig};
+
+use crate::config::{ProviderModel, ProviderProfile};
+
+pub const INSTRUCTIONS: &str = "You are Castle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete. When an interactive diagram, simulation, or visualization helps explain a concept, write a self-contained fenced html block: the desktop renders it directly inside the conversation. Multiple blocks can run independently. Use inline CSS and JavaScript, accessible controls, and responsive widths. Network requests, external scripts/fonts/images, file access, forms, popups, and navigation are unavailable; embed assets as data URLs or inline SVG. Use content-driven height instead of viewport-relative height. Ordinary code examples should use their appropriate language fences.";
+pub const DEEPSEEK_PROVIDER_ID: &str = "deepseek-official";
+pub const OPENAI_PROVIDER_ID: &str = "openai";
+
+const DEEPSEEK_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::High,
+];
+const OPENAI_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Xhigh,
+];
+
+const DEEPSEEK_MODELS: &[(&str, &str, usize)] = &[
+    ("deepseek-v4-flash", "DeepSeek-V4-Flash", 1_000_000),
+    ("deepseek-v4-pro", "DeepSeek-V4-Pro", 1_000_000),
+];
+const OPENAI_MODELS: &[(&str, &str, usize)] = &[
+    ("gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000),
+    ("gpt-5.6-terra", "GPT-5.6 Terra", 1_050_000),
+    ("gpt-5.6-luna", "GPT-5.6 Luna", 1_050_000),
+];
+
+#[derive(Clone)]
+pub struct ConfiguredModel {
+    pub id: String,
+    pub model: Model,
+    pub provider_id: String,
+    pub profile: ProviderModel,
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl ConfiguredModel {
+    pub fn new(provider_id: impl Into<String>, profile: ProviderModel, model: Model) -> Self {
+        let provider_id = provider_id.into();
+        let reasoning_effort = default_reasoning_effort(&provider_id);
+        Self {
+            id: format!("{provider_id}/{}", profile.model_id),
+            model,
+            provider_id,
+            profile,
+            reasoning_effort,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        let model = if self.profile.display_name.trim().is_empty() {
+            &self.profile.model_id
+        } else {
+            &self.profile.display_name
+        };
+        format!("{} · {model}", self.model.name())
+    }
+
+    pub fn session_model_config(&self) -> SessionModelConfig {
+        SessionModelConfig {
+            model_id: Some(self.id.clone()),
+            reasoning_effort: self.reasoning_effort,
+        }
+    }
+}
+
+#[allow(
+    clippy::unreachable,
+    reason = "callers use the closed built-in provider ids"
+)]
+pub fn default_provider_profile(provider_id: &str) -> ProviderProfile {
+    let (display_name, api_base, models) = match provider_id {
+        DEEPSEEK_PROVIDER_ID => ("DeepSeek", "https://api.deepseek.com", DEEPSEEK_MODELS),
+        OPENAI_PROVIDER_ID => ("OpenAI", "https://api.openai.com/v1", OPENAI_MODELS),
+        _ => unreachable!("unsupported provider: {provider_id}"),
+    };
+    ProviderProfile::new(
+        provider_id,
+        display_name,
+        api_base,
+        models
+            .iter()
+            .map(|(id, name, context)| ProviderModel::new(*id, *name, *context, None))
+            .collect(),
+    )
+}
+
+pub fn build_model(provider: &ProviderProfile, profile: &ProviderModel, api_key: String) -> Model {
+    let model = Model::new(
+        provider.display_name.clone(),
+        api_key,
+        provider.api_base.clone(),
+        profile.model_id.clone(),
+        profile.context_window,
+    )
+    .with_max_output_tokens(profile.max_output_tokens);
+    match provider.provider_id.as_str() {
+        DEEPSEEK_PROVIDER_ID | "deepseek" => {
+            model.with_reasoning_efforts(DEEPSEEK_REASONING_EFFORTS)
+        }
+        OPENAI_PROVIDER_ID => model.with_reasoning_efforts(OPENAI_REASONING_EFFORTS),
+        _ => model,
+    }
+}
+
+pub fn default_reasoning_effort(provider_id: &str) -> Option<ReasoningEffort> {
+    match provider_id {
+        DEEPSEEK_PROVIDER_ID | "deepseek" => Some(ReasoningEffort::High),
+        OPENAI_PROVIDER_ID => Some(ReasoningEffort::Medium),
+        _ => None,
+    }
+}
+
+pub fn initial_session_title(input: &str) -> Option<String> {
+    let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let title = chars.by_ref().take(48).collect::<String>();
+    (!title.is_empty()).then(|| {
+        if chars.next().is_some() {
+            format!("{title}…")
+        } else {
+            title
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_model_owns_its_session_selection() {
+        let profile = ProviderModel::new("gpt-test", "GPT Test", 10_000, None);
+        let configured = ConfiguredModel::new(
+            OPENAI_PROVIDER_ID,
+            profile,
+            Model::new("OpenAI", "key", "https://example.com", "gpt-test", 10_000),
+        );
+
+        assert_eq!(
+            configured.session_model_config(),
+            SessionModelConfig {
+                model_id: Some("openai/gpt-test".into()),
+                reasoning_effort: Some(ReasoningEffort::Medium),
+            }
+        );
+    }
+
+    #[test]
+    fn initial_title_is_normalized_and_bounded() {
+        assert_eq!(
+            initial_session_title("  hello\n world  ").as_deref(),
+            Some("hello world")
+        );
+        assert_eq!(
+            initial_session_title(&"a".repeat(49)).as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa…")
+        );
+        assert_eq!(initial_session_title(" \n\t "), None);
+    }
+}

@@ -33,16 +33,40 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn pure_layers_do_not_depend_on_gpui() {
+fn pure_projections_and_layout_do_not_depend_on_gpui_or_execution() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for layer in ["domain", "layout", "application"] {
-        let mut paths = rust_files(&source.join(layer));
-        paths.push(source.join(format!("{layer}.rs")));
-        for path in paths {
-            let text = fs::read_to_string(&path).expect("source file should be readable");
+    let mut paths = rust_files(&source.join("rendering/layout"));
+    paths.extend(
+        [
+            "app/action.rs",
+            "app/reducer.rs",
+            "app/state.rs",
+            "app/layout.rs",
+            "app/presentation.rs",
+            "session/document.rs",
+            "session/ids.rs",
+            "session/message.rs",
+            "session/trajectory.rs",
+            "session/view.rs",
+            "trajectory/timeline.rs",
+            "chat/scroll.rs",
+            "rendering/streaming_markdown.rs",
+        ]
+        .map(|path| source.join(path)),
+    );
+    for path in paths {
+        let text = fs::read_to_string(&path).expect("source file should be readable");
+        for forbidden in [
+            "gpui_kit::",
+            "use gpui",
+            "std::fs::",
+            "tokio::",
+            "SessionCommand",
+            "SessionHandle",
+        ] {
             assert!(
-                !text.contains("gpui_kit::") && !text.contains("use gpui"),
-                "pure layer imported GPUI: {}",
+                !text.contains(forbidden),
+                "{forbidden} entered pure projection/layout: {}",
                 path.display()
             );
         }
@@ -50,12 +74,16 @@ fn pure_layers_do_not_depend_on_gpui() {
 }
 
 #[test]
-fn draw_phase_apis_are_confined_to_the_gpui_adapter() {
+fn draw_phase_apis_are_confined_to_rendering_adapters() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let adapter = source.join("platform/gpui");
+    let adapters = [
+        source.join("rendering/frame_clock.rs"),
+        source.join("rendering/measured_container.rs"),
+        source.join("chat/viewport.rs"),
+    ];
     let guard = source.join("architecture_tests.rs");
     for path in rust_files(&source) {
-        if path.starts_with(&adapter) || path == guard {
+        if adapters.contains(&path) || path == guard {
             continue;
         }
         let text = fs::read_to_string(&path).expect("source file should be readable");
@@ -86,7 +114,7 @@ fn sidebar_rendering_does_not_list_sessions_from_disk() {
     let sidebar = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
-            .join("sidebar.rs"),
+            .join("workspace/sidebar.rs"),
     )
     .expect("sidebar source should be readable");
     assert!(
@@ -96,7 +124,7 @@ fn sidebar_rendering_does_not_list_sessions_from_disk() {
 }
 
 #[test]
-fn agent_public_api_excludes_desktop_presentation_policy() {
+fn harness_public_api_excludes_execution_internals_and_presentation_policy() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("harness")
@@ -110,10 +138,40 @@ fn agent_public_api_excludes_desktop_presentation_policy() {
         "PlannedBatch",
         "ModelPreset",
         "PROVIDER_ID",
+        "ActiveAgent",
+        "AgentEvent",
+        "SessionWriterPermit",
+        "pub mod runtime",
+        "pub use runtime::*",
     ] {
         assert!(
             !public_api.contains(forbidden),
             "desktop presentation policy leaked into agent public API: {forbidden}"
         );
+    }
+}
+
+#[test]
+fn shared_rendering_does_not_depend_on_features_or_session_execution() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut paths = rust_files(&source.join("rendering"));
+    paths.push(source.join("rendering.rs"));
+    for path in paths {
+        let text = fs::read_to_string(&path).unwrap();
+        for forbidden in [
+            "DesktopApp",
+            "crate::app",
+            "crate::chat",
+            "crate::trajectory",
+            "crate::workspace",
+            "SessionCommand",
+            "SessionHandle",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{forbidden} entered shared rendering: {}",
+                path.display()
+            );
+        }
     }
 }

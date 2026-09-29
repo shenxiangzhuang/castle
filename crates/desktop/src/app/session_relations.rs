@@ -1,5 +1,5 @@
 use super::*;
-use crate::assets::DesktopIconName;
+use crate::rendering::assets::DesktopIconName;
 use gpui_kit::component::{
     Disableable, Icon, Sizable,
     button::{Button, ButtonCustomVariant, ButtonVariants},
@@ -42,7 +42,7 @@ impl Relations {
     }
 
     fn render(&self, owner: &WeakEntity<DesktopApp>, cx: &gpui_kit::App) -> AnyElement {
-        let colors = crate::ui_theme::palette(cx);
+        let colors = crate::rendering::theme::palette(cx);
         div()
             .id("session-relations-list")
             .when(cfg!(test), |list| {
@@ -216,7 +216,7 @@ impl DesktopApp {
         let relations = Arc::new(relations);
         let owner = cx.entity().downgrade();
         // Click/keyboard uses the same list as hover, with the framework handling focus/Escape.
-        let colors = crate::ui_theme::palette(cx);
+        let colors = crate::rendering::theme::palette(cx);
         let trigger = Popover::new("session-relations-popover")
             .appearance(false)
             .open(self.relations_open)

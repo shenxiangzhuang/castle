@@ -33,11 +33,11 @@ test-agent:
 
 # Measure Chat source publication/first draw and progressive preparation separately.
 bench-chat:
-    cargo test -p desktop --release --locked conversation::performance::chat_presentation_benchmark -- --ignored --exact --nocapture --test-threads=1
+    cargo test -p desktop --release --locked chat::view::performance::chat_presentation_benchmark -- --ignored --exact --nocapture --test-threads=1
 
 # Compare a shared cache budget with the same three-session code browsing workload.
 bench-chat-cache mib="8":
-    CASTLE_CHAT_CACHE_MIB={{quote(mib)}} cargo test -p desktop --release --locked conversation::performance::chat_cache_benchmark -- --ignored --exact --nocapture --test-threads=1
+    CASTLE_CHAT_CACHE_MIB={{quote(mib)}} cargo test -p desktop --release --locked chat::view::performance::chat_cache_benchmark -- --ignored --exact --nocapture --test-threads=1
 
 # Check all TLA+ models or one named model (requires Java 11+).
 tla-check model="all":

@@ -22,8 +22,7 @@ pub use session::tree::{
 };
 pub use session::{SessionConfig, SessionId, SessionModelConfig};
 
-mod run;
-pub use run::{AgentEffect, AgentInput, Transition};
+pub use session::transition::{AgentEffect, AgentInput, Transition};
 pub fn validate_events(events: &[RecordedEvent]) -> Result<(), SessionMachineError> {
     SessionMachine::from_events(events).map(|_| ())
 }

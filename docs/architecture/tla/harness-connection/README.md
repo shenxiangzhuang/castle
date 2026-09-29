@@ -15,7 +15,8 @@ and unstarted subscriptions.
 | ReadyAfterJoin | `Owner::settle` awaits `ActiveAgent::finish`; `Harness::shutdown` awaits the task tracker |
 | ObserverIsolation | Dropping a connection never sends Stop; only explicit cancellation shuts a run down |
 
-Mapping: [host.rs](../../../../crates/harness/src/host.rs),
+Mapping: [owner.rs](../../../../crates/harness/src/runtime/owner.rs),
+[handle.rs](../../../../crates/harness/src/runtime/handle.rs),
 [store.rs](../../../../crates/harness/src/session/store.rs).
 Reservation and effects are deliberately separate transactions: after a crash, unfinished commands
 remain unknown and cannot be retried automatically. This sacrifices automatic retry progress to avoid

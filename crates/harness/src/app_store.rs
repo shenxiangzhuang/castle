@@ -190,8 +190,8 @@ fn restrict_database_permissions(_database: &Path) -> Result<(), Box<dyn Error>>
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::config::SettingsStore;
     use crate::project::ProjectStore;
-    use crate::settings::SettingsStore;
 
     use super::*;
 

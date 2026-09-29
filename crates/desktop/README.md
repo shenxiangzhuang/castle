@@ -71,7 +71,7 @@ positions in automation:
 
 The multiline text input is the `MultilineTextInput` descendant of `castle.composer.input` and is
 labelled `Message the agent`. Workspace and session identifiers are derived from their durable
-project and session IDs instead of list positions. Treat identifiers in `ui_automation.rs` as a
+project and session IDs instead of list positions. Treat identifiers in `rendering/automation.rs` as a
 compatibility contract: layout and visible copy may change without renaming them.
 
 The desktop trajectory surface is projected directly from session events rather than chat rows. It
@@ -107,13 +107,14 @@ version. DEB, source, and unbundled development builds do not auto-update.
 
 The [core architecture](../../docs/architecture/overview.md) defines the dependency
 `Desktop / CLI -> Harness -> SDK`. Desktop sends commands and projects snapshots/events;
-`SessionRuntime` owns UI projections and pending acknowledgments, while the harness owns execution.
+`SessionConnection` owns UI projections and pending acknowledgments, while the harness owns execution.
 Projects group sessions, not scheduling: sessions run independently of the selected UI view.
 
 [Desktop architecture](../../docs/architecture/desktop.md) owns projection, interaction and
 rendering contracts; [Session](../../docs/architecture/session.md) owns durable semantics.
-`architecture_tests.rs` currently enforces GPUI-free `domain`/`layout`/`application`, draw-phase,
-and render-time filesystem boundaries; it does not yet enforce the target crate split.
+The [module map](../../docs/architecture/overview.md#层内模块) defines source ownership.
+`architecture_tests.rs` enforces crate dependencies, pure projection/layout, shared rendering,
+draw-phase and render-time filesystem boundaries.
 
 ## Verification
 

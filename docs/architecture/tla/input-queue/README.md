@@ -12,7 +12,7 @@ state and have no transition if attachment/cancellation already won.
 | `AtMostOnce` | `SessionMachine` requires inbox membership before attachment |
 | `CancelledNeverAttached` | Cancellation removes inbox membership permanently |
 | `StopPausesQueue` | `AgentLoop` observes cancellation before selecting another input; resume is explicit |
-| `CommittedVisibility` | `SessionRuntime` projects receipts, rather than optimistic queue mutations |
+| `CommittedVisibility` | `SessionConnection` projects receipts, rather than optimistic queue mutations |
 
 A stop racing with an already selected attachment can lose to that attachment. `Stop` models the
 owner observing stop at an operation boundary, not the physical pointer-down event. Similarly,

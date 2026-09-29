@@ -42,7 +42,7 @@ const body = {
   get scrollHeight() { return height; },
   getBoundingClientRect: () => ({ top: 0, bottom: height }),
 };
-runInNewContext(readFileSync(`${__dirname}/../src/html_preview/document.js`, 'utf8'), {
+runInNewContext(readFileSync(`${__dirname}/../src/chat/html_preview/document.js`, 'utf8'), {
   parent: parentWindow,
   document: { body, elementFromPoint: () => root, documentElement: root, scrollingElement: root, fonts: { ready: { then() {} } } },
   Element, WheelEvent,
@@ -238,7 +238,7 @@ const hostWindow = {
   ipc: { postMessage: message => ipc.push(JSON.parse(message)) },
   addEventListener: (name, callback) => { hostEvents[name] = callback; },
 };
-const host = readFileSync(`${__dirname}/../src/html_preview/host.html`, 'utf8')
+const host = readFileSync(`${__dirname}/../src/chat/html_preview/host.html`, 'utf8')
   .split('<script>')[1].split('</script>')[0]
   .replaceAll('__TOKEN__', JSON.stringify('host-capability')).replaceAll('__GENERATION__', '42').replaceAll('__DARK__', 'false')
   .replace('__DOCUMENT__', JSON.stringify('<p>Current document</p>'))

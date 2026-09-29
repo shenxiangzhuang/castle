@@ -6,7 +6,7 @@ Status: accepted
 
 The [core architecture](overview.md) defines the interaction boundary: desktop sends
 harness commands and projects snapshots/events. It does not own execution, authorization policy,
-configuration persistence, or task settlement. GPUI `SessionRuntime` owns only the projection and
+configuration persistence, or task settlement. GPUI `SessionConnection` owns only the projection and
 command acknowledgments; execution and resource settlement live in `harness`.
 
 The desktop builds one canonical `SessionDocument` from committed transactions. Conversation,
@@ -43,7 +43,7 @@ The [session protocol](session.md) owns durable facts and lifecycle validation.
 
 ## Desktop ownership and performance
 
-Each GPUI `SessionRuntime` owns one mutable `SessionDocument` and publishes one immutable
+Each GPUI `SessionConnection` owns one mutable `SessionDocument` and publishes one immutable
 `Arc<SessionView>`. `SessionMachine` is the sole semantic validator: the desktop only preflights the
 committed event cursor before applying a complete batch, so it cannot partially project a transport
 gap and does not maintain a second domain lifecycle validator. Its runtime status is a harness snapshot,
@@ -51,8 +51,12 @@ not a second execution state machine. Applying a committed batch produces a
 small patch of changed stable IDs; persistent maps and vectors share untouched structure and
 preserve stable record arcs.
 
-Views dispatch actions; `domain`, `layout`, and `application` stay GPUI-free. GPUI lifecycle
-calls stay in `platform/gpui`, and native titlebar integration in `platform/native_titlebar.rs`.
+Views dispatch actions. Pure session projection lives in `session/{document,view,message,trajectory}`;
+app actions/reducer/layout/presentation and `trajectory/timeline` remain GPUI-free.
+`session/connection` adapts harness updates to GPUI; `chat/viewport` owns retained chat preparation.
+Shared selection, measurement, frame callbacks and Markdown live in `rendering`; native titlebar
+integration stays in `platform/native_titlebar.rs`. The [core module map](overview.md#层内模块)
+defines directory ownership and the current window-entity boundary.
 Session metadata and committed update times are cached outside rendering; opaque session locators
 are never treated as data files. A collapsed live Think row shows the latest non-blank reasoning
 line and follows its horizontal tail at most once every three display frames. Expanding shows all
@@ -534,7 +538,7 @@ in-progress drag is the only additional interaction state.
 
 ## Desktop updates
 
-`updater.rs` derives the release channel from the application version and selects the Castle
+`platform/updater.rs` derives the release channel from the application version and selects the Castle
 feed by OS and running architecture under `castle/<channel>/<target>/`. macOS uses
 `osx-arm64` or `osx-x64`; a Rosetta-launched Intel binary follows the Intel feed.
 

@@ -54,7 +54,7 @@ only this finite abstraction, not arbitrary tool counts or unbounded crash histo
 | Property | Meaning | Implementation |
 | --- | --- | --- |
 | `TypeOK` | All reachable state has the declared shape | Model sanity check |
-| `ReceiptConsistency` | Live state never leads storage, and a ready owner has applied the current revision | `AgentLoop::commit_planned`, `acquire_writer_and_reload` in [agent_loop.rs](../../../../crates/harness/src/agent_loop.rs) |
+| `ReceiptConsistency` | Live state never leads storage, and a ready owner has applied the current revision | `AgentLoop::commit_planned`, `acquire_writer_and_reload` in [execution/commit.rs](../../../../crates/harness/src/runtime/execution/commit.rs) |
 | `AuthorizedEffects` | Each actual dispatch has durable authorization and dispatch intent | `AgentLoop::execute_tools` |
 | `NoRepeatedExecution` | Each modeled call is dispatched at most once, including recovery | `execute_tools`, `SessionMachine::plan_recovery` in [machine.rs](../../../../crates/agent/src/session/machine.rs) |
 | `PreserveDurableOutcomes` | Recovery cannot downgrade a committed success/error | `SessionMachine::plan_recovery` |
@@ -73,8 +73,8 @@ so a hanging tool does not prevent the modeled cancellation path from settling.
 Existing implementation checks include:
 
 - `ambiguous_commit_is_resolved_and_applied_exactly_once` and
-  `machine_does_not_advance_when_commit_fails_before_sqlite_commit` in `agent_loop.rs`.
-- `tool_finishes_follow_observation_order_but_results_attach_in_call_order` in `agent_loop.rs`.
+  `machine_does_not_advance_when_commit_fails_before_sqlite_commit` in `runtime/execution/tests.rs`.
+- `tool_finishes_follow_observation_order_but_results_attach_in_call_order` in `runtime/execution/tests.rs`.
 - `recovery_preserves_a_durable_tool_outcome_across_the_finish_result_gap`,
   `recovery_distinguishes_finished_and_in_flight_parallel_tools`, and
   `recovery_is_one_batch_and_idempotent_after_apply` in `machine.rs`.

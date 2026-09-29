@@ -1,5 +1,6 @@
 pub mod event;
 pub mod machine;
+pub(crate) mod transition;
 pub mod tree;
 
 use crate::model::ReasoningEffort;

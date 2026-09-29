@@ -1,6 +1,6 @@
 use super::*;
-use crate::domain::MessageId;
-use crate::domain::session_document::ConversationItemId;
+use crate::session::MessageId;
+use crate::session::document::ConversationItemId;
 use harness::{ConversationNode, ConversationNodeKind, InputId};
 
 #[derive(Clone)]

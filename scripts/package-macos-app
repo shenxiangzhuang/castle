@@ -29,7 +29,7 @@ case "$mode" in
 esac
 app="$repo/target/Kcastle.app"
 plist="$repo/crates/desktop/resources/Info.plist"
-icon="$repo/crates/desktop/assets/app-icon.svg"
+icon="$repo/crates/desktop/assets/app-icon.png"
 icon_work=$(mktemp -d /tmp/kcastle-app-icon.XXXXXX)
 trap 'rm -rf "$icon_work"' EXIT
 iconset="$icon_work/AppIcon.iconset"

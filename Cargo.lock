@@ -4361,6 +4361,7 @@ version = "0.2.0-alpha.31"
 dependencies = [
  "block2 0.6.2",
  "cairo-rs",
+ "embed-resource",
  "gdkx11",
  "gpui-kit",
  "gtk",

@@ -103,7 +103,7 @@ jobs:
         run: |
           test ! -f /etc/apt/apt-mirrors.txt || sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
-          sudo apt-get install -y dpkg-dev libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-bin
+          sudo apt-get install -y dpkg-dev libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Build native desktop app
         if: matrix.update_target != 'osx-universal'
         run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
@@ -124,7 +124,7 @@ jobs:
           mkdir -p target/velopack-input
           cp target/${{ matrix.target }}/release/${{ matrix.main_exe }} target/velopack-input/
           if [[ "$RUNNER_OS" == Linux ]]; then
-            rsvg-convert -w 512 -h 512 crates/desktop/assets/app-icon.svg > target/velopack-icon.png
+            cp crates/desktop/assets/app-icon-512.png target/velopack-icon.png
           fi
       - name: Bundle macOS desktop app
         if: runner.os == 'macOS'
@@ -157,6 +157,8 @@ jobs:
           fi
           if [[ "$RUNNER_OS" == Linux ]]; then
             args+=(--icon target/velopack-icon.png --categories Development)
+          elif [[ "$RUNNER_OS" == Windows ]]; then
+            args+=(--icon crates/desktop/assets/app-icon.ico)
           elif [[ "$RUNNER_OS" == macOS ]]; then
             args+=(--signAppIdentity=- --noInst)
           fi

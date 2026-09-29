@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "agent"
-version = "0.2.0-alpha.32"
+version = "0.2.0-alpha.33"
 dependencies = [
  "async-openai",
  "im",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.2.0-alpha.32"
+version = "0.2.0-alpha.33"
 dependencies = [
  "block2 0.6.2",
  "cairo-rs",
@@ -3670,7 +3670,7 @@ dependencies = [
 
 [[package]]
 name = "harness"
-version = "0.2.0-alpha.32"
+version = "0.2.0-alpha.33"
 dependencies = [
  "agent",
  "async-openai",

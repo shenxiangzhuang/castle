@@ -5,14 +5,16 @@ use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Disableable, Icon, IconName};
+use gpui_kit::component::{Disableable, Icon, IconName, Side};
 use gpui_kit::{
     Context, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
 };
 
+use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 use crate::app::{DesktopApp, composer_model_indices};
 use crate::application::{composer_status, empty_conversation_view_model};
+use crate::assets::DesktopIconName;
 use crate::domain::{Action, ComposerMenu, RunState};
 use crate::platform::gpui::measured_container;
 use crate::ui_automation::ids;
@@ -52,12 +54,12 @@ impl DesktopApp {
                                 .items_center()
                                 .justify_center()
                                 .gap_2()
-                                .child(Icon::new(IconName::Bot).size_6())
+                                .child(Icon::new(DesktopIconName::Castle).size_6())
                                 .child(
                                     div()
                                         .text_xl()
                                         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child("Into the Unknown"),
+                                        .child("The Castle Is Out of Reach"),
                                 )
                                 .child(
                                     div()
@@ -168,18 +170,39 @@ impl DesktopApp {
         let pending_inputs = runtime.pending_inputs();
         let input_action_pending = runtime.input_action_pending;
         let input_error = runtime.input_error.clone();
+        let allow_all_tools = runtime.snapshot().allow_all_tools;
+        let (permission_icon, permission_label, permission_description) = if allow_all_tools {
+            (IconName::CircleCheck, "Allow", "Allow all tools")
+        } else {
+            (IconName::CircleUser, "Ask", "Ask before tools")
+        };
         let model_configured = self.models[self.selected_model].model.has_api_key();
         let elapsed = self
             .selected_started_at
             .map(|started_at| started_at.elapsed())
             .unwrap_or_default();
+        let configured_model = &self.models[self.selected_model];
+        let model_name = if configured_model.profile.display_name.trim().is_empty() {
+            &configured_model.profile.model_id
+        } else {
+            &configured_model.profile.display_name
+        };
         let model = if model_configured {
-            self.selected_reasoning_effort
-                .as_ref()
-                .map(|effort| format!("{}  {}", self.model, effort_label(effort)))
-                .unwrap_or_else(|| self.model.clone())
+            let name = compact_model_name(&configured_model.provider_id, model_name);
+            match self.selected_reasoning_effort.as_ref() {
+                Some(effort) => format!("{name} · {}", effort_label(effort)),
+                None => name,
+            }
         } else {
             "Configure model".into()
+        };
+        let model_tooltip = if model_configured {
+            self.selected_reasoning_effort
+                .as_ref()
+                .map(|effort| format!("{} · {} reasoning", self.model, effort_label(effort)))
+                .unwrap_or_else(|| self.model.clone())
+        } else {
+            "Configure an OpenAI or DeepSeek provider".into()
         };
         let measurement_owner = cx.entity().downgrade();
         div()
@@ -299,25 +322,27 @@ impl DesktopApp {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(
-                                Button::new(if hero { "hero-commands" } else { "commands" })
-                                    .accessibility_id(ids::COMPOSER_COMMANDS)
-                                    .icon(IconName::Plus)
-                                    .ghost()
-                                    .compact()
-                                    .disabled(selection_pending)
-                                    .tooltip("Commands")
-                                    .on_key_down(cx.listener(|this, event, window, cx| {
-                                        this.handle_root_key(event, window, cx)
-                                    }))
-                                    .map(|button| {
-                                        self.composer_menu_trigger(
-                                            ComposerMenu::Commands,
-                                            button,
-                                            cx,
-                                        )
-                                    }),
-                            )
+                            .when(!hero, |controls| {
+                                controls.child(
+                                    Button::new("commands")
+                                        .accessibility_id(ids::COMPOSER_COMMANDS)
+                                        .icon(IconName::Plus)
+                                        .ghost()
+                                        .compact()
+                                        .disabled(selection_pending)
+                                        .tooltip("Commands")
+                                        .on_key_down(cx.listener(|this, event, window, cx| {
+                                            this.handle_root_key(event, window, cx)
+                                        }))
+                                        .map(|button| {
+                                            self.composer_menu_trigger(
+                                                ComposerMenu::Commands,
+                                                button,
+                                                cx,
+                                            )
+                                        }),
+                                )
+                            })
                             .child(
                                 Button::new(if hero {
                                     "hero-access-settings"
@@ -325,24 +350,13 @@ impl DesktopApp {
                                     "access-settings"
                                 })
                                 .accessibility_id(ids::COMPOSER_PERMISSION)
-                                .icon(
-                                    if self.selected_runtime.read(cx).snapshot().allow_all_tools {
-                                        IconName::CircleCheck
-                                    } else {
-                                        IconName::TriangleAlert
-                                    },
-                                )
-                                .label(
-                                    if self.selected_runtime.read(cx).snapshot().allow_all_tools {
-                                        "Allow all tools"
-                                    } else {
-                                        "Ask before tools"
-                                    },
-                                )
+                                .icon(permission_icon)
+                                .label(permission_label)
+                                .accessibility_label(permission_description)
                                 .ghost()
                                 .compact()
                                 .disabled(selection_pending)
-                                .tooltip("Select tool approval behavior")
+                                .tooltip(permission_description)
                                 .on_key_down(cx.listener(|this, event, window, cx| {
                                     this.handle_root_key(event, window, cx)
                                 }))
@@ -364,14 +378,11 @@ impl DesktopApp {
                                     "model-settings"
                                 })
                                 .accessibility_id(ids::COMPOSER_MODEL)
+                                .accessibility_label(model_tooltip.clone())
+                                .icon(provider_icon(&configured_model.provider_id))
                                 .label(model)
                                 .ghost()
                                 .compact()
-                                .tooltip(if model_configured {
-                                    "Select model and reasoning effort"
-                                } else {
-                                    "Configure an OpenAI or DeepSeek provider"
-                                })
                                 .disabled(running || selection_pending)
                                 .on_key_down(cx.listener(|this, event, window, cx| {
                                     this.handle_root_key(event, window, cx)
@@ -424,7 +435,7 @@ impl DesktopApp {
         let owner = cx.entity().downgrade();
         Popover::new(("composer-popup", kind as usize))
             .anchor(if kind == ComposerMenu::Model {
-                gpui_kit::Anchor::BottomRight
+                gpui_kit::Anchor::BottomCenter
             } else {
                 gpui_kit::Anchor::BottomLeft
             })
@@ -581,7 +592,14 @@ fn composer_popup_menu(
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    menu = menu.min_w(px(240.0)).max_h(px(360.0)).scrollable(true);
+    menu = menu
+        .min_w(px(if kind == ComposerMenu::Model {
+            180.0
+        } else {
+            240.0
+        }))
+        .max_h(px(360.0))
+        .scrollable(true);
     let Some(app) = owner.upgrade() else {
         return menu;
     };
@@ -641,35 +659,36 @@ fn composer_popup_menu(
             menu
         }
         ComposerMenu::Model => {
-            let models = owner.clone();
-            menu.submenu("Model", window, cx, move |menu, window, cx| {
-                composer_popup_menu(models.clone(), ComposerMenu::Models, menu, window, cx)
-            })
-            .submenu("Reasoning effort", window, cx, move |menu, window, cx| {
-                composer_popup_menu(owner.clone(), ComposerMenu::Effort, menu, window, cx)
-            })
-        }
-        ComposerMenu::Models => {
             let app = app.read(cx);
+            menu = menu.check_side(Side::Right).item(
+                PopupMenuItem::element(|_, _| div().ml_neg_4().child("Model")).disabled(true),
+            );
             for index in composer_model_indices(&app.models) {
                 let owner = owner.clone();
+                let configured = &app.models[index];
+                let model_name = if configured.profile.display_name.trim().is_empty() {
+                    &configured.profile.model_id
+                } else {
+                    &configured.profile.display_name
+                };
                 menu = menu.item(
-                    PopupMenuItem::new(app.models[index].label())
+                    PopupMenuItem::new(compact_model_name(&configured.provider_id, model_name))
+                        .icon(provider_icon(&configured.provider_id))
                         .checked(index == app.selected_model)
                         .on_click(move |_, _, cx| {
                             let _ = owner.update(cx, |this, cx| this.select_model(index, cx));
                         }),
                 );
             }
-            menu
-        }
-        ComposerMenu::Effort => {
-            let app = app.read(cx);
+            menu = menu.separator().item(
+                PopupMenuItem::element(|_, _| div().ml_neg_4().child("Reasoning")).disabled(true),
+            );
             for effort in app.models[app.selected_model].model.reasoning_efforts() {
                 let owner = owner.clone();
                 let effort = *effort;
                 menu = menu.item(
                     PopupMenuItem::new(effort_label(&effort))
+                        .icon(IconName::Asterisk)
                         .checked(app.selected_reasoning_effort == Some(effort))
                         .on_click(move |_, _, cx| {
                             let _ =
@@ -720,5 +739,42 @@ fn effort_label(effort: &kcastle_agent::ReasoningEffort) -> &'static str {
         kcastle_agent::ReasoningEffort::Medium => "Medium",
         kcastle_agent::ReasoningEffort::High => "High",
         kcastle_agent::ReasoningEffort::Xhigh => "XHigh",
+    }
+}
+
+fn compact_model_name(provider_id: &str, name: &str) -> String {
+    match provider_id {
+        DEEPSEEK_PROVIDER_ID | "deepseek" => name
+            .strip_prefix("DeepSeek-")
+            .unwrap_or(name)
+            .replace('-', " "),
+        OPENAI_PROVIDER_ID => name.strip_prefix("GPT-").unwrap_or(name).to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
+fn provider_icon(provider_id: &str) -> Icon {
+    match provider_id {
+        DEEPSEEK_PROVIDER_ID | "deepseek" => Icon::new(DesktopIconName::DeepSeek),
+        OPENAI_PROVIDER_ID => Icon::new(DesktopIconName::OpenAi),
+        _ => Icon::new(IconName::Bot),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composer_model_label_drops_redundant_provider_copy() {
+        assert_eq!(
+            compact_model_name(DEEPSEEK_PROVIDER_ID, "DeepSeek-V4-Flash"),
+            "V4 Flash"
+        );
+        assert_eq!(
+            compact_model_name(OPENAI_PROVIDER_ID, "GPT-5.6 Sol"),
+            "5.6 Sol"
+        );
+        assert_eq!(effort_label(&kcastle_agent::ReasoningEffort::High), "High");
     }
 }

@@ -8,8 +8,11 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Icon, IconName, Sizable};
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea, accesskit::Role, div,
-    linear_color_stop, linear_gradient, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea,
+    accesskit::{Role, Toggled},
+    deferred, div, linear_color_stop, linear_gradient,
+    prelude::FluentBuilder,
+    px,
 };
 
 use crate::assets::DesktopIconName;
@@ -47,12 +50,6 @@ impl DesktopApp {
             .child(self.sidebar_primary_navigation(cx))
             .child(self.workspace_header(cx))
             .child(self.workspace_tree(cx))
-            .children(
-                self.core
-                    .sidebar
-                    .options_open
-                    .then(|| self.sidebar_options(cx)),
-            )
             .child(
                 div()
                     .flex()
@@ -112,7 +109,7 @@ impl DesktopApp {
             .child(
                 Button::new("open-sidebar")
                     .accessibility_id(ids::SIDEBAR_TOGGLE)
-                    .icon(IconName::PanelLeftOpen)
+                    .icon(IconName::PanelLeft)
                     .ghost()
                     .compact()
                     .tooltip("Toggle sidebar (⌘B)")
@@ -121,7 +118,7 @@ impl DesktopApp {
             .child(
                 Button::new("collapsed-new-chat")
                     .accessibility_id(ids::NEW_SESSION)
-                    .icon(DesktopIconName::SquarePen)
+                    .icon(IconName::Plus)
                     .ghost()
                     .compact()
                     .tooltip("New session")
@@ -147,7 +144,7 @@ impl DesktopApp {
             .child(
                 Button::new("hide-sidebar")
                     .accessibility_id(ids::SIDEBAR_TOGGLE)
-                    .icon(IconName::PanelLeftClose)
+                    .icon(IconName::PanelLeft)
                     .ghost()
                     .compact()
                     .tooltip("Toggle sidebar (⌘B)")
@@ -205,9 +202,9 @@ impl DesktopApp {
                             .items_center()
                             .justify_start()
                             .w_full()
-                            .gap_1()
+                            .gap_2()
                             .text_sm()
-                            .child(Icon::new(DesktopIconName::SquarePen).size_4())
+                            .child(Icon::new(IconName::Plus).size_4())
                             .child("New session"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
@@ -241,19 +238,34 @@ impl DesktopApp {
                             .items_center()
                             .gap_1()
                             .child(
-                                Button::new("sort-sessions")
-                                    .icon(IconName::Settings2)
-                                    .ghost()
-                                    .compact()
-                                    .tooltip("View options")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_sidebar_options(cx)
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .child(
+                                        Button::new("sort-sessions")
+                                            .accessibility_id("kcastle.sidebar.options")
+                                            .icon(IconName::Ellipsis)
+                                            .ghost()
+                                            .compact()
+                                            .tooltip("View options")
+                                            .when(cfg!(test), |button| {
+                                                button.debug_selector(|| {
+                                                    "sidebar-options-trigger".into()
+                                                })
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_sidebar_options(cx)
+                                            })),
+                                    )
+                                    .children(self.core.sidebar.options_open.then(|| {
+                                        deferred(self.sidebar_options(cx))
+                                            .with_priority(gpui_kit::base::POPUP_PRIORITY)
                                     })),
                             )
                             .child(
                                 Button::new("add-project")
                                     .accessibility_id(ids::WORKSPACE_ADD)
-                                    .icon(IconName::FolderOpen)
+                                    .icon(IconName::Plus)
                                     .ghost()
                                     .compact()
                                     .tooltip("Add workspace")
@@ -268,10 +280,17 @@ impl DesktopApp {
     fn sidebar_options(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         div()
+            .id("sidebar-options")
+            .role(Role::Menu)
+            .aria_label("View options")
             .absolute()
-            .top(px(176.0))
-            .right(px(36.0))
+            .top_0()
+            .left_full()
+            .ml_1()
             .w(px(210.0))
+            .when(cfg!(test), |menu| {
+                menu.debug_selector(|| "sidebar-options".into())
+            })
             .p_2()
             .rounded_xl()
             .border_1()
@@ -430,35 +449,17 @@ impl DesktopApp {
                                     .min_w(px(0.0))
                                     .gap_1()
                                     .child(
-                                        div()
-                                            .relative()
-                                            .flex_none()
-                                            .size(px(metrics::SIDEBAR_ICON_SLOT))
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .top_0()
-                                                    .left_0()
-                                                    .group_hover(project_group.clone(), |icon| icon.invisible())
-                                                    .child(
-                                                        Icon::new(IconName::Folder)
-                                                            .size_4()
-                                                            .text_color(if active { colors.primary } else { colors.muted_text }),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .top_0()
-                                                    .left_0()
-                                                    .invisible()
-                                                    .group_hover(project_group.clone(), |icon| icon.visible())
-                                                    .child(
-                                                        Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight })
-                                                            .size_4()
-                                                            .text_color(if active { colors.primary } else { colors.muted_text }),
-                                                    ),
-                                            ),
+                                        Icon::new(if expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size_4()
+                                        .text_color(if active {
+                                            colors.primary
+                                        } else {
+                                            colors.muted_text
+                                        }),
                                     )
                                     .child(
                                         div()
@@ -503,7 +504,7 @@ impl DesktopApp {
                                     }))
                                     .child(
                                         Button::new(("new-workspace-session", index))
-                                            .icon(DesktopIconName::SquarePen)
+                                            .icon(IconName::Plus)
                                             .ghost()
                                             .compact()
                                             .tooltip("New session in workspace")
@@ -749,6 +750,14 @@ fn sidebar_option(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .role(Role::MenuItemRadio)
+        .aria_label(label)
+        .aria_toggled(if selected {
+            Toggled::True
+        } else {
+            Toggled::False
+        })
+        .when(cfg!(test), |item| item.debug_selector(move || id.into()))
         .flex()
         .items_center()
         .justify_between()

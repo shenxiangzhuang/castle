@@ -15,7 +15,10 @@ const SQUARE_PEN_PATH: &str = "icons/square-pen.svg";
 const DOWNLOAD_PATH: &str = "icons/download.svg";
 const ARCHIVE_PATH: &str = "icons/archive.svg";
 const BRANCHES_PATH: &str = "icons/branches.svg";
+const CASTLE_PATH: &str = "icons/castle.svg";
 const CLOCK_PATH: &str = "icons/clock.svg";
+const DEEPSEEK_PATH: &str = "icons/deepseek.svg";
+const OPENAI_PATH: &str = "icons/openai.svg";
 static GENERATED_ASSETS: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 static NEXT_GENERATED_ASSET: AtomicU64 = AtomicU64::new(0);
 
@@ -85,6 +88,11 @@ impl AssetSource for DesktopAssets {
                 "../assets/icons/branches.svg"
             ))));
         }
+        if path == CASTLE_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/castle.svg"
+            ))));
+        }
         if path == CLOCK_PATH {
             return Ok(Some(Cow::Borrowed(include_bytes!(
                 "../assets/icons/clock.svg"
@@ -105,6 +113,16 @@ impl AssetSource for DesktopAssets {
                 "../assets/icons/session-relations.svg"
             ))));
         }
+        if path == DEEPSEEK_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/deepseek.svg"
+            ))));
+        }
+        if path == OPENAI_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/openai.svg"
+            ))));
+        }
         ComponentAssets.load(path)
     }
 
@@ -122,6 +140,9 @@ impl AssetSource for DesktopAssets {
         if BRANCHES_PATH.starts_with(path) {
             assets.push(BRANCHES_PATH.into());
         }
+        if CASTLE_PATH.starts_with(path) {
+            assets.push(CASTLE_PATH.into());
+        }
         if CLOCK_PATH.starts_with(path) {
             assets.push(CLOCK_PATH.into());
         }
@@ -134,6 +155,12 @@ impl AssetSource for DesktopAssets {
         if "icons/session-relations.svg".starts_with(path) {
             assets.push("icons/session-relations.svg".into());
         }
+        if DEEPSEEK_PATH.starts_with(path) {
+            assets.push(DEEPSEEK_PATH.into());
+        }
+        if OPENAI_PATH.starts_with(path) {
+            assets.push(OPENAI_PATH.into());
+        }
         Ok(assets)
     }
 }
@@ -145,8 +172,11 @@ pub(crate) enum DesktopIconName {
     SessionChildren,
     SessionRelations,
     Archive,
+    Castle,
     Clock,
+    DeepSeek,
     Download,
+    OpenAi,
     SquarePen,
 }
 
@@ -158,8 +188,11 @@ impl IconNamed for DesktopIconName {
             Self::SessionRelations => "icons/session-relations.svg",
             Self::Branches => BRANCHES_PATH,
             Self::Archive => ARCHIVE_PATH,
+            Self::Castle => CASTLE_PATH,
             Self::Clock => CLOCK_PATH,
+            Self::DeepSeek => DEEPSEEK_PATH,
             Self::Download => DOWNLOAD_PATH,
+            Self::OpenAi => OPENAI_PATH,
             Self::SquarePen => SQUARE_PEN_PATH,
         }
         .into()
@@ -171,6 +204,13 @@ mod tests {
     use super::*;
     #[test]
     fn generated_asset_lives_only_as_long_as_its_presentation() {
+        for icon in [
+            DesktopIconName::Castle,
+            DesktopIconName::DeepSeek,
+            DesktopIconName::OpenAi,
+        ] {
+            assert!(DesktopAssets.load(&icon.path()).unwrap().is_some());
+        }
         let asset = register_generated_asset(b"<svg/>".to_vec());
         let path = asset.path.clone();
         let frame = asset.clone();

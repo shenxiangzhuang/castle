@@ -25,8 +25,6 @@ pub(crate) enum ComposerMenu {
     Commands,
     Permission,
     Model,
-    Models,
-    Effort,
     Workspace,
 }
 

@@ -42,8 +42,8 @@ fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
 
-qlmanage -t -s 1024 -o "$icon_work" "$icon" >/dev/null 2>&1
-rendered="$icon_work/app-icon.svg.png"
+rendered="$icon_work/app-icon.png"
+sips -s format png "$icon" --out "$rendered" >/dev/null
 [[ -f "$rendered" ]]
 for spec in \
     '16 icon_16x16.png' \

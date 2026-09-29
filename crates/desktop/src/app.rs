@@ -361,7 +361,7 @@ impl DesktopApp {
         core.session.current = current_session.clone();
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(1, 14)
+                .auto_grow(3, 14)
                 .submit_on_enter(true)
                 .placeholder("Describe what you want to build")
         });
@@ -3725,7 +3725,7 @@ mod tests {
         });
         cx.update(|window, cx| {
             view.update(cx, |app, cx| {
-                app.open_composer_menu(ComposerMenu::Commands, window, cx)
+                app.open_composer_menu(ComposerMenu::Model, window, cx)
             })
         });
         cx.run_until_parked();
@@ -3865,6 +3865,39 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |app, _| assert!(app.modal.is_none()));
 
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_options_stay_aligned_with_trigger(cx: &mut gpui_kit::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-sidebar-options-{}",
+            kcastle_agent::SessionId::new()
+        ));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        cx.simulate_resize(gpui_kit::size(px(1180.0), px(720.0)));
+        cx.run_until_parked();
+        let trigger = cx.debug_bounds("sidebar-options-trigger").unwrap();
+        cx.simulate_click(trigger.center(), Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.core.sidebar.options_open));
+        let menu = cx.debug_bounds("sidebar-options").unwrap();
+        let gap = menu.left() - trigger.right();
+        assert!(gap >= px(0.0) && gap <= px(8.0), "menu gap: {gap:?}");
+        assert!(
+            (menu.top() - trigger.top()).abs() <= px(8.0),
+            "menu: {menu:?}, trigger: {trigger:?}"
+        );
+        let all_sessions = cx.debug_bounds("group-all-sessions").unwrap();
+        cx.simulate_click(all_sessions.center(), Default::default());
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(!app.core.sidebar.group_by_workspace);
+            assert!(!app.core.sidebar.options_open);
+        });
         close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4135,9 +4168,17 @@ mod tests {
                 ProviderModel::new("gpt-test", "GPT Test", 10_000, None),
                 Model::new("OpenAI", "secret", "http://localhost", "gpt-test", 10_000),
             ),
+            ConfiguredModel::new(
+                "openai",
+                ProviderModel::new("gpt-test-2", "GPT Test 2", 10_000, None),
+                Model::new("OpenAI", "secret", "http://localhost", "gpt-test-2", 10_000),
+            ),
         ];
 
-        assert_eq!(composer_model_indices(&models).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            composer_model_indices(&models).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         assert_eq!(
             active_model_index(&models, Some("deepseek-official/deepseek-test")),
             Some(1)

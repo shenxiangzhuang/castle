@@ -7,7 +7,7 @@ Project-specific knowledge is organized by purpose:
 Long-lived responsibilities, boundaries, and invariants.
 
 - [Architecture index](architecture/README.md)
-- [Workspace overview](architecture/overview.md)
+- [Core architecture: layers, public API, and tradeoffs](architecture/overview.md)
 - [Session](architecture/session.md)
 - [Desktop](architecture/desktop.md)
 - [Desktop app storage](architecture/app-storage.md)

@@ -1,6 +1,6 @@
 set shell := ["zsh", "-cu"]
 
-app_bundle := "target/Kcastle.app"
+app_bundle := "target/Castle.app"
 
 # List available recipes.
 default:
@@ -27,17 +27,17 @@ test:
     cargo test --workspace --locked
     cargo test --locked -p ratex-font-loader -p ratex-unicode-font
 
-# Run the focused agent test suite.
+# Run SDK decisions and headless harness execution tests.
 test-agent:
-    cargo test -p kcastle-agent
+    cargo test -p agent -p harness
 
 # Measure Chat source publication/first draw and progressive preparation separately.
 bench-chat:
-    cargo test -p kcastle-desktop --release --locked conversation::performance::chat_presentation_benchmark -- --ignored --exact --nocapture --test-threads=1
+    cargo test -p desktop --release --locked conversation::performance::chat_presentation_benchmark -- --ignored --exact --nocapture --test-threads=1
 
 # Compare a shared cache budget with the same three-session code browsing workload.
 bench-chat-cache mib="8":
-    KCASTLE_CHAT_CACHE_MIB={{quote(mib)}} cargo test -p kcastle-desktop --release --locked conversation::performance::chat_cache_benchmark -- --ignored --exact --nocapture --test-threads=1
+    CASTLE_CHAT_CACHE_MIB={{quote(mib)}} cargo test -p desktop --release --locked conversation::performance::chat_cache_benchmark -- --ignored --exact --nocapture --test-threads=1
 
 # Check all TLA+ models or one named model (requires Java 11+).
 tla-check model="all":

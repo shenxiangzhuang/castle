@@ -5,7 +5,8 @@ Status: accepted
 ## Decision
 
 Session v2 uses a project-local SQLite WAL database as the only durable source of truth.
-JSONL is an export format, not a runtime database. A single session engine owns the session
+JSONL is an export format, not a runtime database. Under the [core architecture](overview.md),
+the SDK owns domain transition and replay rules; one harness owner per session owns the live
 machine, serializes commands, commits complete domain transactions, evolves the in-memory machine
 only after commit, publishes the committed transaction, and only then starts external effects.
 
@@ -64,7 +65,7 @@ digests; the storage contract must not depend on desktop dependencies enabling t
 - A request is built from the full canonical request snapshot that was committed immediately before
   dispatch, never from a second mutable configuration path.
 - `Model` contains only connection data and static capabilities. The active model selection and
-  reasoning effort belong to `SessionConfig`; desktop settings supply defaults only when a session
+  reasoning effort belong to `SessionConfig`; app-level settings supply defaults only when a session
   is created.
 - Ordinary requests and compactions resolve those two inputs once, persist the actual model,
   reasoning effort, and output limit before dispatch, and build the provider request from the same
@@ -73,6 +74,11 @@ digests; the storage contract must not depend on desktop dependencies enabling t
   surface; it never rewrites prior journal transactions.
 
 ## Runtime ownership and control
+
+The public boundary is the harness command/event connection defined in the
+[core architecture](overview.md). The harness owns admission, configuration, approvals, task
+settlement and recovery; UI adapters only project events. The following APIs are private harness implementation details;
+frontends use `SessionCommand`, `SessionUpdate` and `RuntimeSnapshot`:
 
 - An idle `Agent` owns one replayable `SessionMachine` and one concrete transactional
   `SessionStore`; there is no second validator or mutable persistence mirror.
@@ -109,8 +115,8 @@ input starts a new turn only when the current turn would settle. Neither interru
 Submission acknowledgements follow committed `InputSubmitted` events. Stop is observed before
 selecting another pending input; an already selected/committing attachment may win a simultaneous
 stop. Cancellation never deletes remaining pending messages and does not automatically restart.
-`Agent::resume_pending` explicitly starts with the oldest prioritized message, otherwise the oldest
-queued message, reusing its identity. Sending a new message while idle is also an explicit new run;
+Explicit `SessionCommand::ResumePending` starts with the oldest prioritized message,
+otherwise the oldest queued message, reusing its identity. Sending a new message while idle is also an explicit new run;
 remaining messages are then drained after that message. Reopening only reconstructs pending state.
 An idle cancellation acquires the same writer, reloads/recovers the session, and returns all
 committed receipts to the host even if the requested cancellation loses to earlier consumption.
@@ -124,6 +130,6 @@ The [conversation tree contract](conversation-tree.md) defines append-only head 
 atomic editing and independent Fork seeds. `SessionMachine` validates path contexts and
 requires quiescence, including an empty pending queue. A Fork seed is the child's first event;
 its normalized path evidence is validated before child metadata, journal and origin index
-commit together. The source head remains unchanged. SQLite schema 2, event format 4,
+commit together. The source head remains unchanged. SQLite schema 3 (schema 2 introduced the fork index), event format 4,
 search extractor 2 and machine semantics 2 fence incompatible readers. The bounded
 [conversation-tree model](tla/conversation-tree/README.md) checks this protocol.

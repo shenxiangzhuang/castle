@@ -1,6 +1,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn workspace_dependencies_enforce_sdk_harness_desktop_layers() {
+    let desktop = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk = fs::read_to_string(desktop.join("../agent/Cargo.toml")).unwrap();
+    for dependency in ["tokio", "rusqlite", "libc", "gpui-kit", "harness"] {
+        assert!(
+            !sdk.lines().any(|line| line.starts_with(dependency)),
+            "SDK depends on {dependency}"
+        );
+    }
+    let frontend = fs::read_to_string(desktop.join("Cargo.toml")).unwrap();
+    assert!(frontend.contains("harness.workspace = true"));
+    assert!(!frontend.contains("agent.workspace = true"));
+}
+
 fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut pending = vec![root.to_owned()];
@@ -84,7 +99,7 @@ fn sidebar_rendering_does_not_list_sessions_from_disk() {
 fn agent_public_api_excludes_desktop_presentation_policy() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("agent")
+        .join("harness")
         .join("src")
         .join("lib.rs");
     let public_api = fs::read_to_string(source).expect("agent public API should be readable");
@@ -101,30 +116,4 @@ fn agent_public_api_excludes_desktop_presentation_policy() {
             "desktop presentation policy leaked into agent public API: {forbidden}"
         );
     }
-}
-
-#[test]
-fn agent_harness_modules_follow_ownership_boundaries() {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("agent")
-        .join("src");
-    let agent = fs::read_to_string(source.join("agent.rs")).expect("Agent source should exist");
-    let agent_loop =
-        fs::read_to_string(source.join("agent_loop.rs")).expect("agent loop source should exist");
-    let context =
-        fs::read_to_string(source.join("context.rs")).expect("context source should exist");
-    let session =
-        fs::read_to_string(source.join("session.rs")).expect("session source should exist");
-
-    assert!(agent.contains("pub struct Agent"));
-    assert!(agent.contains("impl Agent"));
-    assert!(agent_loop.contains("struct AgentLoop"));
-    assert!(agent_loop.contains("mod control;"));
-    assert!(context.contains("mod compaction;"));
-    assert!(!session.contains("mod context;"));
-    assert!(source.join("agent_loop/control.rs").is_file());
-    assert!(source.join("context/compaction.rs").is_file());
-    assert!(!source.join("runtime.rs").exists());
-    assert!(!source.join("runtime").exists());
 }

@@ -31,9 +31,9 @@ Release PRs must still pass all checks before merging, as described in [Release 
 ## Focused checks
 
 ```sh
-cargo test -p kcastle-agent
-cargo test -p kcastle-desktop
-cargo check -p kcastle-desktop
+cargo test -p agent
+cargo test -p desktop
+cargo check -p desktop
 ```
 
 Run TLA+ model checks with `just tla-check` and `just tla-self-test`.
@@ -51,7 +51,7 @@ Update user-facing documentation when core usage changes. Use Conventional Commi
 
 ## Pending-message acceptance
 
-Use a packaged app with an isolated `KCASTLE_DATA_DIR` and a local Responses-compatible provider
+Use a packaged app with an isolated `CASTLE_DATA_DIR` and a local Responses-compatible provider
 whose replies can be held open. Do not point this check at a production provider or user sessions.
 
 1. Start a message and hold its response. An empty draft shows Stop; typing text shows Send.

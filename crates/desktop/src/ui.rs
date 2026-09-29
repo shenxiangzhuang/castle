@@ -152,7 +152,7 @@ impl Render for DesktopApp {
             .id("app-main")
             .role(Role::Main)
             .accessibility_id(ids::APP_MAIN)
-            .aria_label("Kcastle")
+            .aria_label("Castle")
             .relative()
             .flex()
             .size_full()

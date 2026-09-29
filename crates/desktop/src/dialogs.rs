@@ -13,7 +13,7 @@ use gpui_kit::{
     StatefulInteractiveElement, StyleRefinement, Styled, Window, accesskit::Role, div,
     prelude::FluentBuilder, px, rgb,
 };
-use kcastle_agent::SessionInfo;
+use harness::SessionInfo;
 
 use crate::agent_config::{ConfiguredModel, DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 use crate::app::{DesktopApp, active_model_index, same_path, session_age};
@@ -1828,7 +1828,7 @@ fn display_path(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kcastle_agent::Model;
+    use harness::Model;
 
     use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 

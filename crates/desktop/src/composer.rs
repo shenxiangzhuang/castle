@@ -250,7 +250,7 @@ impl DesktopApp {
                                 let prioritize_id = input.input_id.clone();
                                 let edit_id = input.input_id.clone();
                                 let cancel_id = input.input_id;
-                                let prioritized = input.origin == kcastle_agent::InputOrigin::Steer;
+                                let prioritized = input.origin == harness::InputOrigin::Steer;
                                 div().id(("pending-message", index)).role(Role::Group).aria_label(format!("{}: {}", if prioritized { "Waiting to join current task" } else { "Pending" }, input.input)).flex().items_center().gap_2()
                                     .child(div().flex_1().min_w(px(0.0)).text_sm().child(input.input))
                                     .when(prioritized, |row| row.child(div().text_xs().text_color(colors.muted_text)
@@ -731,14 +731,14 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-fn effort_label(effort: &kcastle_agent::ReasoningEffort) -> &'static str {
+fn effort_label(effort: &harness::ReasoningEffort) -> &'static str {
     match effort {
-        kcastle_agent::ReasoningEffort::None => "Off",
-        kcastle_agent::ReasoningEffort::Minimal => "Minimal",
-        kcastle_agent::ReasoningEffort::Low => "Low",
-        kcastle_agent::ReasoningEffort::Medium => "Medium",
-        kcastle_agent::ReasoningEffort::High => "High",
-        kcastle_agent::ReasoningEffort::Xhigh => "XHigh",
+        harness::ReasoningEffort::None => "Off",
+        harness::ReasoningEffort::Minimal => "Minimal",
+        harness::ReasoningEffort::Low => "Low",
+        harness::ReasoningEffort::Medium => "Medium",
+        harness::ReasoningEffort::High => "High",
+        harness::ReasoningEffort::Xhigh => "XHigh",
     }
 }
 
@@ -775,6 +775,6 @@ mod tests {
             compact_model_name(OPENAI_PROVIDER_ID, "GPT-5.6 Sol"),
             "5.6 Sol"
         );
-        assert_eq!(effort_label(&kcastle_agent::ReasoningEffort::High), "High");
+        assert_eq!(effort_label(&harness::ReasoningEffort::High), "High");
     }
 }

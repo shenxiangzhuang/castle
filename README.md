@@ -1,13 +1,14 @@
-# Kcastle
-
-[![Crates.io](https://img.shields.io/crates/v/kcastle-agent.svg)](https://crates.io/crates/kcastle-agent)
+# Castle
 
 A native agent harness with a GPUI desktop application.
+
+The workspace keeps three internal layers: desktop → harness → SDK. See the
+[core architecture](docs/architecture/overview.md). The crates are not published independently.
 
 ## Install
 
 Download the DMG (macOS), Setup EXE (Windows), or AppImage/DEB (Linux) from
-[GitHub Releases](https://github.com/shenxiangzhuang/kcastle/releases).
+[GitHub Releases](https://github.com/shenxiangzhuang/castle/releases).
 
 ## Run
 
@@ -16,7 +17,7 @@ From a source checkout:
 
 ```bash
 just macos-run                         # macOS app bundle
-cargo run -p kcastle-desktop --release # Linux or Windows desktop app
+cargo run -p desktop --release # Linux or Windows desktop app
 ```
 
 Desktop details live in [crates/desktop/README.md](crates/desktop/README.md).

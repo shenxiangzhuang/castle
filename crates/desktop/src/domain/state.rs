@@ -7,8 +7,8 @@ use crate::domain::{
     LayoutGeneration, Message, RunId, SessionView, TrajectoryItemId, TrajectoryRequestKey,
 };
 use crate::layout::{LayoutInput, LayoutPlan, resolve_layout};
+use harness::RunFailure;
 use im::Vector;
-use kcastle_agent::RunFailure;
 
 pub(crate) const INITIAL_SESSION_LIMIT: usize = 5;
 pub(crate) const SESSION_PAGE_SIZE: usize = 10;

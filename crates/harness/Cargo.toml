@@ -1,0 +1,32 @@
+[package]
+name = "harness"
+description = "Minimal native agent harness for the OpenAI Responses API"
+readme = "README.md"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["agent", "openai", "responses", "harness"]
+categories = ["api-bindings", "development-tools"]
+
+[dependencies]
+agent.workspace = true
+async-openai = { workspace = true, features = ["responses", "rustls"] }
+futures-util.workspace = true
+im.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

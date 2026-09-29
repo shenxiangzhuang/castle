@@ -16,7 +16,7 @@ use super::Placement;
 define_class!(
     // NSView has no additional subclass invariants. Its geometry is accessed on the UI thread.
     #[unsafe(super = NSView)]
-    #[name = "KcastleHtmlClipView"]
+    #[name = "CastleHtmlClipView"]
     #[thread_kind = MainThreadOnly]
     #[ivars = Cell<Option<Bounds<Pixels>>>]
     struct PreviewClip;

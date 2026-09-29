@@ -16,9 +16,9 @@ use gpui_kit::{
     AppContext, Bounds, Context, Entity, FocusHandle, ListAlignment, ListOffset, ListState,
     PathPromptOptions, Pixels, Point, ScrollHandle, Subscription, Window, point, px,
 };
-use kcastle_agent::{Agent, Session, SessionConfig, SessionError, SessionId, SessionInfo};
 #[cfg(test)]
-use kcastle_agent::{Model, SessionCatalog, SessionModelConfig, SessionStoreError};
+use harness::{Model, SessionCatalog, SessionModelConfig, SessionStoreError};
+use harness::{Session, SessionConfig, SessionError, SessionId, SessionInfo, SessionSetup};
 
 use crate::agent_config::ConfiguredModel;
 use crate::application::session_catalog::{
@@ -151,7 +151,7 @@ impl Default for SessionViewState {
 }
 
 pub(crate) struct DesktopStartup {
-    pub(crate) agent: Agent,
+    pub(crate) agent: SessionSetup,
     pub(crate) models: Vec<ConfiguredModel>,
     pub(crate) selected_model: usize,
     pub(crate) project_store: ProjectStore,
@@ -265,7 +265,7 @@ pub(crate) struct DesktopApp {
     pub(crate) trajectory_details_markdown: RefCell<TrajectoryDetailsMarkdownCache>,
     pub(crate) models: Vec<ConfiguredModel>,
     pub(crate) selected_model: usize,
-    pub(crate) selected_reasoning_effort: Option<kcastle_agent::ReasoningEffort>,
+    pub(crate) selected_reasoning_effort: Option<harness::ReasoningEffort>,
     pub(crate) model: String,
     pub(crate) project_store: ProjectStore,
     pub(crate) settings: SettingsStore,
@@ -315,8 +315,9 @@ impl DesktopApp {
         let current_session_id = agent.session_info().id.clone();
         let runtime_config = config_for_model(&models[selected_model], settings.allow_all_tools());
         let selected_reasoning_effort = runtime_config.model.reasoning_effort;
-        let runtime = cx.new(|_| {
+        let runtime = cx.new(|cx| {
             SessionRuntime::new(
+                &cx.global::<crate::platform::gpui::ApplicationHarness>().0,
                 agent,
                 project.id.as_str().to_owned(),
                 project.sessions_dir.clone(),
@@ -806,7 +807,7 @@ impl DesktopApp {
     fn create_runtime(
         &mut self,
         project_index: usize,
-        mut session: Session,
+        session: Session,
         cx: &mut Context<Self>,
     ) -> Option<Entity<SessionRuntime>> {
         let project = self.project_store.project(project_index)?.clone();
@@ -818,7 +819,7 @@ impl DesktopApp {
         {
             return Some(runtime);
         }
-        let document = match SessionDocument::from_events(session.take_events()) {
+        let document = match SessionDocument::from_events(session.events().to_vec()) {
             Ok(document) => document,
             Err(_) => return None,
         };
@@ -836,14 +837,15 @@ impl DesktopApp {
             config = config_for_model(configured, self.settings.allow_all_tools());
         }
         let needs_model_selection = config.model.model_id.as_deref() != Some(&configured.id);
-        let agent = Agent::new(
+        let agent = SessionSetup::new(
             configured.model.clone(),
             crate::INSTRUCTIONS,
             session,
             project.path.clone(),
         );
-        let runtime = cx.new(|_| {
+        let runtime = cx.new(|cx| {
             SessionRuntime::new(
+                &cx.global::<crate::platform::gpui::ApplicationHarness>().0,
                 agent,
                 project.id.as_str().to_owned(),
                 project.sessions_dir,
@@ -858,7 +860,7 @@ impl DesktopApp {
         Some(runtime)
     }
 
-    /// Reuses a cached runtime only when its idle Agent, metadata, configuration, and journal
+    /// Reuses a cached runtime only when its idle SessionSetup, metadata, configuration, and journal
     /// revision all match the snapshot just loaded from SQLite. An active runtime remains the
     /// single owner if an asynchronous open races with a new run.
     fn reconcile_loaded_runtime(
@@ -1355,9 +1357,9 @@ impl DesktopApp {
         self.composer_submitting = true;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = accepted
-                .await
-                .unwrap_or_else(|_| Err("Message was not accepted; please retry".into()));
+            let result = accepted.await.unwrap_or_else(|_| {
+                Err("Input acceptance was not confirmed; reopen the session before retrying".into())
+            });
             let _ = cx.update(|window, app| {
                 this.update(app, |this, cx| {
                     this.composer_submitting = false;
@@ -1401,7 +1403,7 @@ impl DesktopApp {
 
     pub(crate) fn edit_pending(
         &mut self,
-        input_id: kcastle_agent::InputId,
+        input_id: harness::InputId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2523,7 +2525,7 @@ impl DesktopApp {
 
     pub(crate) fn set_reasoning_effort(
         &mut self,
-        effort: kcastle_agent::ReasoningEffort,
+        effort: harness::ReasoningEffort,
         cx: &mut Context<Self>,
     ) {
         if self.selection_pending() || self.task_active() {
@@ -2866,10 +2868,20 @@ mod tests {
     use super::*;
 
     fn close_test_window(view: Entity<DesktopApp>, cx: &mut gpui_kit::VisualTestContext) {
+        let harness = cx.update(|_, cx| {
+            cx.global::<crate::platform::gpui::ApplicationHarness>()
+                .0
+                .clone()
+        });
         let weak_view = view.downgrade();
         drop(view);
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();
+        // Execution now outlives the UI subscription. Join before deleting SQLite files,
+        // including on Windows where an open connection prevents directory removal.
+        if let Ok(executor) = tokio::runtime::Handle::try_current() {
+            executor.block_on(harness.shutdown());
+        }
         assert!(
             weak_view.upgrade().is_none(),
             "closing the test window must release its app and session database handles"
@@ -2881,7 +2893,7 @@ mod tests {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let _entered = executor.enter();
         cx.background_executor.allow_parking();
-        let root = std::env::temp_dir().join(format!("kcastle-fork-project-{}", SessionId::new()));
+        let root = std::env::temp_dir().join(format!("castle-fork-project-{}", SessionId::new()));
         let (mut project_store, _) = ProjectStore::load(root.join("state"), None).unwrap();
         let mut indices = Vec::new();
         for name in ["before", "source", "after"] {
@@ -2904,7 +2916,7 @@ mod tests {
             "Completed reply",
         );
         let model = Model::new("test", "key", "http://127.0.0.1:1", "test-model", 10_000);
-        let agent = Agent::new(
+        let agent = SessionSetup::new(
             model.clone(),
             "test",
             Session::memory(),
@@ -3003,7 +3015,7 @@ mod tests {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let _entered = executor.enter();
         cx.background_executor.allow_parking();
-        let root = std::env::temp_dir().join(format!("kcastle-tree-ui-{}", SessionId::new()));
+        let root = std::env::temp_dir().join(format!("castle-tree-ui-{}", SessionId::new()));
         let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
         // A deterministic connection refusal settles each admitted message without external IO.
         let model = Model::new("test", "key", "http://127.0.0.1:1", "test-model", 10_000);
@@ -3057,7 +3069,7 @@ mod tests {
             )
         });
         let (reply_model, reply_server) = text_stream_model("Completed reply");
-        cx.update(|window, cx| {
+        cx.update(|_window, cx| {
             view.update(cx, |app, cx| {
                 assert!(
                     !app.can_fork_message(key, cx),
@@ -3066,6 +3078,11 @@ mod tests {
                 app.models[0].model = reply_model;
                 app.selected_runtime
                     .update(cx, |runtime, cx| runtime.refresh_model(&app.models[0], cx));
+            })
+        });
+        settle(&view, cx);
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
                 app.input.update(cx, |input, cx| {
                     input.set_value("ordinary draft", window, cx)
                 });
@@ -3383,7 +3400,7 @@ mod tests {
             let _entered = executor.enter();
             cx.background_executor.allow_parking();
             let root =
-                std::env::temp_dir().join(format!("kcastle-pending-edit-{}", SessionId::new()));
+                std::env::temp_dir().join(format!("castle-pending-edit-{}", SessionId::new()));
             let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
             // Leave the provider response blocked while queue commands are processed.
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3496,11 +3513,18 @@ mod tests {
             // Another writer withdraws the last message; the UI still has a stale row.
             executor.block_on(async {
                 let session = Session::open(&path).await.unwrap();
-                let agent = Agent::new(model, "test", session, ".");
-                let (_, _, result) = agent
-                    .cancel_pending_input(pending[2].input_id.clone())
-                    .await;
-                result.unwrap();
+                let agent = SessionSetup::new(model, "test", session, ".");
+                let host = harness::SessionHandle::new(
+                    agent,
+                    String::new(),
+                    None,
+                    SessionConfig::default(),
+                );
+                host.send(harness::SessionCommand::CancelInput(
+                    pending[2].input_id.clone(),
+                ))
+                .await
+                .unwrap();
             });
             let source = view.read_with(cx, |app, _| app.selected_runtime.clone());
             cx.update(|window, cx| {
@@ -3555,7 +3579,7 @@ mod tests {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let _entered = executor.enter();
         cx.background_executor.allow_parking();
-        let root = std::env::temp_dir().join(format!("kcastle-draft-receipt-{}", SessionId::new()));
+        let root = std::env::temp_dir().join(format!("castle-draft-receipt-{}", SessionId::new()));
         let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
         let (model, server) = text_stream_model("done");
         startup.models = vec![ConfiguredModel::new(
@@ -3612,7 +3636,7 @@ mod tests {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let _entered = executor.enter();
         cx.background_executor.allow_parking();
-        let root = std::env::temp_dir().join(format!("kcastle-draft-receipt-{}", SessionId::new()));
+        let root = std::env::temp_dir().join(format!("castle-draft-receipt-{}", SessionId::new()));
         let (mut startup, _) = crate::desktop_startup(root.clone()).unwrap();
         let (model, server) = text_stream_model("done");
         startup.models = vec![ConfiguredModel::new(
@@ -3663,7 +3687,7 @@ mod tests {
     #[gpui_kit::test]
     fn composer_primary_button_tracks_running_and_draft_content(cx: &mut gpui_kit::TestAppContext) {
         let root =
-            std::env::temp_dir().join(format!("kcastle-composer-buttons-{}", SessionId::new()));
+            std::env::temp_dir().join(format!("castle-composer-buttons-{}", SessionId::new()));
         let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
@@ -3702,9 +3726,12 @@ mod tests {
     #[gpui_kit::test]
     fn framework_controls_own_navigation_and_modal_dismissal(cx: &mut gpui_kit::TestAppContext) {
         use crate::domain::ComposerMenu;
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
+        cx.background_executor.allow_parking();
         let root = std::env::temp_dir().join(format!(
-            "kcastle-framework-controls-{}",
-            kcastle_agent::SessionId::new()
+            "castle-framework-controls-{}",
+            harness::SessionId::new()
         ));
         let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
         cx.update(crate::init_ui);
@@ -3718,7 +3745,17 @@ mod tests {
         });
         cx.run_until_parked();
         cx.simulate_keystrokes("down down enter");
-        cx.run_until_parked();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while !view.read_with(cx, |app, cx| {
+            app.selected_runtime.read(cx).snapshot().allow_all_tools
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "permission command was not acknowledged"
+            );
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         view.read_with(cx, |app, cx| {
             assert!(app.selected_runtime.read(cx).snapshot().allow_all_tools);
             assert!(app.core.composer.menu.is_none());
@@ -3785,8 +3822,8 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-session-search-dialog-{}",
-            kcastle_agent::SessionId::new()
+            "castle-session-search-dialog-{}",
+            harness::SessionId::new()
         ));
         let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
         cx.update(crate::init_ui);
@@ -3872,8 +3909,8 @@ mod tests {
     #[gpui_kit::test]
     fn sidebar_options_stay_aligned_with_trigger(cx: &mut gpui_kit::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-sidebar-options-{}",
-            kcastle_agent::SessionId::new()
+            "castle-sidebar-options-{}",
+            harness::SessionId::new()
         ));
         let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
         cx.update(crate::init_ui);
@@ -3917,7 +3954,7 @@ mod tests {
         }
 
         let root = std::env::temp_dir().join(format!(
-            "kcastle-trajectory-scroll-{}-{}",
+            "castle-trajectory-scroll-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -4108,10 +4145,30 @@ mod tests {
                 .unwrap()
                 .block_on(async move {
                     let session = Session::open_in_project(path, &project_id).await.unwrap();
-                    let agent = Agent::new(model, "test", session, ".");
-                    let mut active = agent.start(input);
-                    while active.next_event().await.is_some() {}
-                    active.finish().await.unwrap().session_revision()
+                    let agent = SessionSetup::new(model, "test", session, ".");
+                    let host = harness::SessionHandle::new(
+                        agent,
+                        project_id,
+                        None,
+                        SessionConfig::default(),
+                    );
+                    let mut connection = host.connect().unwrap();
+                    host.send(harness::SessionCommand::Submit {
+                        id: harness::InputId::random(),
+                        text: input,
+                        mode: harness::SubmitMode::Start,
+                    })
+                    .await
+                    .unwrap();
+                    loop {
+                        if let harness::SessionUpdate::Changed(snapshot) =
+                            connection.events.recv().await.unwrap()
+                            && !snapshot.status.is_active()
+                        {
+                            assert!(matches!(snapshot.status, harness::RuntimeStatus::Idle));
+                            break snapshot.revision;
+                        }
+                    }
                 })
         });
         let revision = runner.join().unwrap();
@@ -4129,13 +4186,19 @@ mod tests {
                 .unwrap()
                 .block_on(async move {
                     let session = Session::open_in_project(path, &project_id).await.unwrap();
-                    let mut agent = Agent::new(
+                    let agent = SessionSetup::new(
                         Model::new("test", "key", "http://localhost", "test-model", 10_000),
                         "test",
                         session,
                         ".",
                     );
-                    agent.persist_session_config(&config).await.unwrap();
+                    let host = harness::SessionHandle::new(agent, project_id, None, config.clone());
+                    host.send(harness::SessionCommand::Configure {
+                        config,
+                        model: None,
+                    })
+                    .await
+                    .unwrap();
                 });
         })
         .join()
@@ -4272,7 +4335,7 @@ mod tests {
         const SESSIONS_PER_PROJECT: usize = 3_334;
 
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-linear-catalog-{}-{}",
+            "castle-desktop-linear-catalog-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -4412,7 +4475,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-invalid-switch-{}-{}",
+            "castle-desktop-invalid-switch-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -4440,7 +4503,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace_a);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace_a);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -4461,9 +4524,7 @@ mod tests {
         });
 
         std::fs::write(
-            project_b
-                .sessions_dir
-                .join(kcastle_agent::SESSION_DATABASE_FILE),
+            project_b.sessions_dir.join(harness::SESSION_DATABASE_FILE),
             b"not a sqlite database",
         )
         .unwrap();
@@ -4557,13 +4618,12 @@ mod tests {
     fn runtime_creation_preserves_defaults_and_persists_model_fallback(
         cx: &mut gpui_kit::TestAppContext,
     ) {
-        use kcastle_agent::ReasoningEffort;
+        use harness::ReasoningEffort;
 
         let executor = tokio::runtime::Runtime::new().unwrap();
         let _entered = executor.enter();
         cx.background_executor.allow_parking();
-        let root =
-            std::env::temp_dir().join(format!("kcastle-runtime-config-{}", SessionId::new()));
+        let root = std::env::temp_dir().join(format!("castle-runtime-config-{}", SessionId::new()));
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let (project_store, active_project) =
@@ -4584,7 +4644,7 @@ mod tests {
         );
         selected.reasoning_effort = Some(ReasoningEffort::High);
         let expected = config_for_model(&selected, true);
-        let agent = Agent::new(
+        let agent = SessionSetup::new(
             selected.model.clone(),
             "test",
             Session::memory(),
@@ -4636,7 +4696,7 @@ mod tests {
         assert_eq!(stored.config(), &expected);
         assert!(stored.events().iter().any(|recorded| matches!(
             &recorded.event,
-            kcastle_agent::SessionEvent::RequestSnapshot { model, reasoning_effort, session_config, .. }
+            harness::SessionEvent::RequestSnapshot { model, reasoning_effort, session_config, .. }
                 if model == "test-model"
                     && *reasoning_effort == Some(ReasoningEffort::High)
                     && session_config == &expected
@@ -4696,7 +4756,7 @@ mod tests {
     #[gpui_kit::test]
     fn created_session_path_refreshes_the_sidebar_list(cx: &mut gpui_kit::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-new-session-{}-{}",
+            "castle-desktop-new-session-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -4708,7 +4768,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -4763,7 +4823,7 @@ mod tests {
                 app.core
                     .workspace
                     .sessions_dir
-                    .join(kcastle_agent::SESSION_DATABASE_FILE)
+                    .join(harness::SESSION_DATABASE_FILE)
                     .is_file()
             );
             assert_eq!(
@@ -4785,7 +4845,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-invalid-open-{}-{}",
+            "castle-desktop-invalid-open-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -4806,7 +4866,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -4875,7 +4935,7 @@ mod tests {
     #[gpui_kit::test]
     fn archive_and_restore_refresh_both_session_catalogs(cx: &mut gpui_kit::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-archive-{}-{}",
+            "castle-desktop-archive-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -4896,7 +4956,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -4945,7 +5005,7 @@ mod tests {
     #[gpui_kit::test]
     fn stale_session_open_cannot_replace_a_new_chat_draft(cx: &mut gpui_kit::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-stale-open-{}-{}",
+            "castle-desktop-stale-open-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -4964,7 +5024,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5023,7 +5083,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-pending-open-command-gate-{}-{}",
+            "castle-desktop-pending-open-command-gate-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -5042,7 +5102,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5143,7 +5203,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-pending-open-view-state-{}-{}",
+            "castle-desktop-pending-open-view-state-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -5162,7 +5222,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5273,7 +5333,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-cross-project-open-failure-{}-{}",
+            "castle-desktop-cross-project-open-failure-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -5289,7 +5349,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace_a);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace_a);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5401,7 +5461,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-reopen-cache-{}-{}",
+            "castle-desktop-reopen-cache-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -5428,7 +5488,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), &workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), &workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5589,7 +5649,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-settled-runtime-cache-{}-{}",
+            "castle-desktop-settled-runtime-cache-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -5612,7 +5672,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -5747,7 +5807,7 @@ mod tests {
 
     #[test]
     fn trajectory_folds_are_isolated_by_session_view_state() {
-        let assistant = TrajectoryItemId::Assistant(kcastle_agent::RequestId::from("request-a"));
+        let assistant = TrajectoryItemId::Assistant(harness::RequestId::from("request-a"));
         let mut first = SessionViewState {
             trajectory_offset: Some(ListOffset {
                 item_ix: 17,
@@ -5802,7 +5862,7 @@ mod tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-desktop-evicted-timeline-state-{}-{}",
+            "castle-desktop-evicted-timeline-state-{}-{}",
             std::process::id(),
             now_ms()
         ));
@@ -5821,7 +5881,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
         let configured = ConfiguredModel::new("test", profile, model.clone());
-        let agent = Agent::new(model, "test", Session::memory(), workspace);
+        let agent = SessionSetup::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {

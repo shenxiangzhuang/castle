@@ -220,7 +220,7 @@ fn recompute_layout(state: &mut AppState, effects: &mut Vec<Effect>) {
 mod tests {
     use std::path::PathBuf;
 
-    use kcastle_agent::RequestId;
+    use harness::RequestId;
 
     use super::*;
     use crate::domain::timeline::{AxisId, AxisRange, DomainRange, TimelineMode};

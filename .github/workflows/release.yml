@@ -20,28 +20,6 @@ permissions:
   contents: write
 
 jobs:
-  publish-crates:
-    if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify release tag
-        run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle-agent") | .version')
-          test "v${version}" = "${GITHUB_REF_NAME}"
-      - name: Publish kcastle-agent
-        run: cargo publish --locked -p kcastle-agent
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      - name: Wait for registry propagation
-        run: |
-          version=${GITHUB_REF_NAME#v}
-          for attempt in {1..12}; do
-            cargo info "kcastle-agent@${version}" && exit 0
-            sleep 10
-          done
-          exit 1
   release-matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -53,7 +31,7 @@ jobs:
       - id: targets
         run: |
           python3 scripts/release-matrix.py --self-test
-          matrix=$(python3 scripts/release-matrix.py "$RELEASE_TAG")
+          matrix=$(python3 scripts/release-matrix.py)
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
   desktop-apps:
     needs: release-matrix
@@ -77,7 +55,7 @@ jobs:
           dotnet tool install --tool-path target/vpk vpk --version 1.2.110-ge826545
           echo "$GITHUB_WORKSPACE/target/vpk" >> "$GITHUB_PATH"
       - name: Select macOS updater architecture before signing and packaging
-        if: runner.os == 'macOS' && matrix.update_target != 'osx-universal'
+        if: runner.os == 'macOS'
         env:
           MACOS_ARCH: ${{ matrix.macos_arches }}
         run: |
@@ -96,7 +74,7 @@ jobs:
       - name: Verify release tag
         shell: bash
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle-agent") | .version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "desktop") | .version')
           test "v${version}" = "$RELEASE_TAG"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
@@ -105,18 +83,7 @@ jobs:
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
           sudo apt-get install -y dpkg-dev libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libgtk-3-dev libwebkit2gtk-4.1-dev
       - name: Build native desktop app
-        if: matrix.update_target != 'osx-universal'
-        run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
-      - name: Build final universal macOS bridge
-        if: matrix.update_target == 'osx-universal'
-        run: |
-          cargo build --release --locked -p kcastle-desktop --target aarch64-apple-darwin
-          cargo build --release --locked -p kcastle-desktop --target x86_64-apple-darwin
-          mkdir -p target/universal-apple-darwin/release
-          lipo -create \
-            target/aarch64-apple-darwin/release/kcastle-desktop \
-            target/x86_64-apple-darwin/release/kcastle-desktop \
-            -output target/universal-apple-darwin/release/kcastle-desktop
+        run: cargo build --release --locked -p desktop --target ${{ matrix.target }}
       - name: Stage Linux or Windows desktop app
         if: runner.os != 'macOS'
         shell: bash
@@ -128,7 +95,7 @@ jobs:
           fi
       - name: Bundle macOS desktop app
         if: runner.os == 'macOS'
-        run: scripts/package-macos-app --binary target/${{ matrix.target }}/release/kcastle-desktop
+        run: scripts/package-macos-app --binary target/${{ matrix.target }}/release/castle-desktop
       - name: Build Velopack release
         shell: bash
         run: |
@@ -142,12 +109,12 @@ jobs:
           echo "UPDATE_CHANNEL=$channel" >> "$GITHUB_ENV"
 
           args=(
-            --packId Kcastle
+            --packId Castle
             --packVersion "$version"
             --packDir "${{ matrix.pack_dir }}"
             --mainExe "${{ matrix.main_exe }}"
-            --packTitle Kcastle
-            --packAuthors "kcastle contributors"
+            --packTitle Castle
+            --packAuthors "castle contributors"
             --channel "$channel"
             --outputDir target/velopack
             --delta None
@@ -171,7 +138,7 @@ jobs:
           primary="${{ matrix.primary_asset }}"
 
           if [[ "$RUNNER_OS" == Linux ]]; then
-            generated="Kcastle-${UPDATE_CHANNEL}.AppImage"
+            generated="Castle-${UPDATE_CHANNEL}.AppImage"
             mv "target/velopack/${generated}" "target/velopack/${primary}"
             secondary="${{ matrix.secondary_asset }}"
             scripts/package-deb \
@@ -183,19 +150,19 @@ jobs:
             mv "$assets_tmp" "$assets_file"
           elif [[ "$RUNNER_OS" == macOS ]]; then
             staging=$(mktemp -d)
-            ditto -x -k "target/velopack/Kcastle-${UPDATE_CHANNEL}-Portable.zip" "$staging"
-            for binary in kcastle UpdateMac; do
-              executable="$staging/Kcastle.app/Contents/MacOS/$binary"
+            ditto -x -k "target/velopack/Castle-${UPDATE_CHANNEL}-Portable.zip" "$staging"
+            for binary in castle UpdateMac; do
+              executable="$staging/Castle.app/Contents/MacOS/$binary"
               actual=$(lipo -archs "$executable" | tr ' ' '\n' | sort | xargs)
               expected=$(echo "${{ matrix.macos_arches }}" | tr ' ' '\n' | sort | xargs)
               test "$actual" = "$expected"
             done
-            codesign --verify --deep --strict "$staging/Kcastle.app"
+            codesign --verify --deep --strict "$staging/Castle.app"
             ln -s /Applications "$staging/Applications"
-            hdiutil create -volname Kcastle -srcfolder "$staging" -ov -format UDZO \
+            hdiutil create -volname Castle -srcfolder "$staging" -ov -format UDZO \
               "target/velopack/${primary}"
           else
-            generated="Kcastle-${UPDATE_CHANNEL}-Setup.exe"
+            generated="Castle-${UPDATE_CHANNEL}-Setup.exe"
             mv "target/velopack/${generated}" "target/velopack/${primary}"
             jq --arg generated "$generated" --arg primary "$primary" \
               'map(if .RelativeFileName == $generated then .RelativeFileName = $primary else . end)' \
@@ -211,7 +178,7 @@ jobs:
             --endpoint "$R2_S3_ENDPOINT" \
             --region auto \
             --bucket "$R2_BUCKET" \
-            --prefix "$UPDATE_CHANNEL/${{ matrix.update_target }}" \
+            --prefix "castle/$UPDATE_CHANNEL/${{ matrix.update_target }}" \
             --keyId "$R2_ACCESS_KEY_ID" \
             --secret "$R2_SECRET_ACCESS_KEY"
         env:
@@ -231,7 +198,7 @@ jobs:
             content_type=application/vnd.debian.binary-package
           fi
           aws s3 cp "target/velopack/${asset}" \
-            "s3://${R2_BUCKET}/${UPDATE_CHANNEL}/${{ matrix.update_target }}/${asset}" \
+            "s3://${R2_BUCKET}/castle/${UPDATE_CHANNEL}/${{ matrix.update_target }}/${asset}" \
             --endpoint-url "$R2_S3_ENDPOINT" \
             --content-type "$content_type" \
             --no-progress
@@ -245,13 +212,13 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == Linux ]]; then
-            retired="Kcastle-${UPDATE_CHANNEL}.AppImage"
+            retired="Castle-${UPDATE_CHANNEL}.AppImage"
           elif [[ "$RUNNER_OS" == macOS ]]; then
-            retired="Kcastle-${UPDATE_CHANNEL}-Setup.pkg"
+            retired="Castle-${UPDATE_CHANNEL}-Setup.pkg"
           else
-            retired="Kcastle-${UPDATE_CHANNEL}-Setup.exe"
+            retired="Castle-${UPDATE_CHANNEL}-Setup.exe"
           fi
-          key="$UPDATE_CHANNEL/${{ matrix.update_target }}/$retired"
+          key="castle/$UPDATE_CHANNEL/${{ matrix.update_target }}/$retired"
           aws s3api delete-object \
             --endpoint-url "$R2_S3_ENDPOINT" \
             --bucket "$R2_BUCKET" \
@@ -273,7 +240,7 @@ jobs:
         shell: bash
         run: |
           version=${RELEASE_TAG#v}
-          base="${{ vars.R2_PUBLIC_BASE_URL }}/${UPDATE_CHANNEL}/${{ matrix.update_target }}"
+          base="${{ vars.R2_PUBLIC_BASE_URL }}/castle/${UPDATE_CHANNEL}/${{ matrix.update_target }}"
           feed="${base}/releases.${UPDATE_CHANNEL}.json?version=${version}"
           curl --fail --silent --show-error --retry 5 --retry-delay 2 "$feed" \
             | jq -e --arg version "$version" '.Assets | any(.Version == $version and .Type == "Full")'

@@ -1,13 +1,13 @@
 # Architecture
 
-These documents describe current responsibilities, boundaries, and contracts.
-`Status: accepted` means the design is adopted; verification results are recorded
-by tests and CI for each commit. Filenames follow responsibilities; protocol versions
-belong in the content and history.
+The [core architecture](overview.md) is authoritative for layer boundaries, public API,
+and tradeoffs. `Status: accepted` means a design is adopted, not necessarily implemented;
+target designs identify outstanding migration explicitly. Protocol and presentation documents
+retain their narrower contracts. Verification results belong to tests and CI for each commit.
 
 | Document | Responsibility | Formal model |
 | --- | --- | --- |
-| [Workspace overview](overview.md) | Crate boundaries and dependency direction | — |
+| [Core architecture](overview.md) | SDK / harness / interaction boundaries, public API, tradeoffs, and migration | — |
 | [Session](session.md) | Durable facts, transactions, lifecycle, and runtime ownership | [Session tools](tla/session-tools/README.md) |
 | [Desktop](desktop.md) | Projection, timing semantics, interaction, and rendering | — |
 | [App storage](app-storage.md) | Product configuration and catalog persistence | — |

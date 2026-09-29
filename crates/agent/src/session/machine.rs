@@ -21,7 +21,7 @@ use crate::session::event::{
 
 /// Increment when an existing serialized event sequence can no longer be interpreted with the
 /// same validity and state-transition semantics.
-pub(crate) const SESSION_MACHINE_SEMANTICS_VERSION: u32 = 2;
+pub const SESSION_MACHINE_SEMANTICS_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingInput {
@@ -239,7 +239,6 @@ impl SessionMachine {
         Ok(machine)
     }
 
-    #[cfg(test)]
     pub fn next_seq(&self) -> u64 {
         self.next_seq
     }

@@ -1,6 +1,6 @@
 #![no_main]
 
-use kcastle_agent::{RecordedEvent, validate_events};
+use agent::{RecordedEvent, validate_events};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

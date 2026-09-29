@@ -43,10 +43,7 @@ fn fixture(first_id: u64, count: usize, text: &str) -> Arc<SessionView> {
 }
 
 fn setup(cx: &mut TestAppContext) -> (PathBuf, Entity<DesktopApp>, &mut VisualTestContext) {
-    let root = std::env::temp_dir().join(format!(
-        "kcastle-chat-perf-{}",
-        kcastle_agent::SessionId::new()
-    ));
+    let root = std::env::temp_dir().join(format!("castle-chat-perf-{}", harness::SessionId::new()));
     let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
     cx.update(crate::init_ui);
     let (view, cx) = cx.add_window_view(|window, cx| {
@@ -455,7 +452,7 @@ fn chat_cache_benchmark(cx: &mut TestAppContext) {
     if cfg!(debug_assertions) {
         panic!("use --release");
     }
-    let mib: usize = std::env::var("KCASTLE_CHAT_CACHE_MIB")
+    let mib: usize = std::env::var("CASTLE_CHAT_CACHE_MIB")
         .unwrap_or_else(|_| "8".into())
         .parse()
         .unwrap();

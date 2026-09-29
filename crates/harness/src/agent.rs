@@ -122,17 +122,14 @@ impl Agent {
 
     /// Revision of the canonical session snapshot currently owned by this agent.
     ///
-    /// UI runtimes use this together with [`Self::session_config`] to decide whether an idle,
+    /// UI runtimes use this together with the session config to decide whether an idle,
     /// cached agent still represents the current store snapshot before reusing it.
+    #[cfg(test)]
     pub fn session_revision(&self) -> u64 {
         self.revision
     }
 
     /// Durable configuration loaded into the session snapshot currently owned by this agent.
-    pub fn session_config(&self) -> &SessionConfig {
-        &self.session_config
-    }
-
     pub fn set_model(&mut self, model: Model) {
         self.compaction = Some(CompactionConfig::new(model.context_window()));
         self.model = model;
@@ -147,10 +144,6 @@ impl Agent {
         self.info = parts.info;
         self.session_config = parts.config;
         self.clock = EventClock::new();
-    }
-
-    pub fn set_cwd(&mut self, cwd: impl Into<PathBuf>) {
-        self.env.cwd = cwd.into();
     }
 
     pub async fn rename_session(&mut self, title: &str) -> Result<(), AgentError> {
@@ -204,6 +197,7 @@ impl Agent {
         self.tools.iter().map(|tool| tool.schema()).collect()
     }
 
+    #[cfg(test)]
     pub fn start(self, input: impl Into<String>) -> ActiveAgent {
         agent_loop::start(self, input.into())
     }
@@ -217,10 +211,6 @@ impl Agent {
         !self.info.is_archived() && self.machine.require_quiescent().is_ok()
     }
 
-    pub fn conversation_tree(&self) -> &crate::ConversationTree {
-        self.machine.tree()
-    }
-
     pub fn edit_input(
         self,
         input_id: crate::InputId,
@@ -232,6 +222,7 @@ impl Agent {
         agent_loop::edit_input(self, input_id, input, target, revision, head)
     }
 
+    #[cfg(test)]
     pub async fn select_conversation(
         self,
         target: Option<u64>,

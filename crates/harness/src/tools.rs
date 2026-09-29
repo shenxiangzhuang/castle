@@ -316,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn shell_timeout_kills_the_entire_process_group() {
         let directory = std::env::temp_dir().join(format!(
-            "kcastle-process-group-{}-{}",
+            "castle-process-group-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -6,13 +6,13 @@ mode=${1:-release}
 case "$mode" in
     release)
         profile=release
-        build_args=(-p kcastle-desktop --release --locked)
-        binary="$repo/target/$profile/kcastle-desktop"
+        build_args=(-p desktop --release --locked)
+        binary="$repo/target/$profile/castle-desktop"
         ;;
     debug)
         profile=debug
-        build_args=(-p kcastle-desktop --locked)
-        binary="$repo/target/$profile/kcastle-desktop"
+        build_args=(-p desktop --locked)
+        binary="$repo/target/$profile/castle-desktop"
         ;;
     --binary)
         [[ $# -eq 2 ]] || {
@@ -27,10 +27,10 @@ case "$mode" in
         exit 2
         ;;
 esac
-app="$repo/target/Kcastle.app"
+app="$repo/target/Castle.app"
 plist="$repo/crates/desktop/resources/Info.plist"
 icon="$repo/crates/desktop/assets/app-icon.png"
-icon_work=$(mktemp -d /tmp/kcastle-app-icon.XXXXXX)
+icon_work=$(mktemp -d /tmp/castle-app-icon.XXXXXX)
 trap 'rm -rf "$icon_work"' EXIT
 iconset="$icon_work/AppIcon.iconset"
 
@@ -63,9 +63,9 @@ done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 
 cp "$plist" "$app/Contents/Info.plist"
-version=${$(cargo pkgid -p kcastle-desktop)##*@}
+version=${$(cargo pkgid -p desktop)##*[#@]}
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
-install -m 755 "$binary" "$app/Contents/MacOS/kcastle"
+install -m 755 "$binary" "$app/Contents/MacOS/castle"
 codesign --force --deep --sign - "$app"
 codesign --verify --deep --strict "$app"
 echo "Packaged $app ($version)"

@@ -1,7 +1,8 @@
 [package]
-name = "kcastle-agent"
-description = "Minimal native agent harness for the OpenAI Responses API"
+name = "agent"
+description = "Pure agent state, context and transition rules"
 readme = "README.md"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,19 +13,10 @@ categories = ["api-bindings", "development-tools"]
 
 [dependencies]
 async-openai.workspace = true
-futures-util.workspace = true
 im.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
-tokio-util = { workspace = true, features = ["rt"] }
 uuid.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
 [dev-dependencies]
 proptest.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

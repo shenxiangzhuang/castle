@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use harness::{RunId, TokenUsage};
 use im::{HashMap, Vector};
-use kcastle_agent::{RunId, TokenUsage};
 
 use crate::domain::session_document::{
     DisplayOrdinals, ItemStatus, ModelRequestOptions, ProjectionDelta, PromptChangeKind,
@@ -87,7 +87,7 @@ pub(crate) enum TrajectoryRecordDetails {
     },
     Tool {
         request_key: TrajectoryRequestKey,
-        parent_call_id: Option<kcastle_agent::CallId>,
+        parent_call_id: Option<harness::CallId>,
         prompt: Arc<PromptSnapshot>,
         schema_name: Arc<str>,
     },
@@ -1520,7 +1520,7 @@ impl RecordTiming {
 
 #[cfg(test)]
 mod tests {
-    use kcastle_agent::SessionEvent;
+    use harness::SessionEvent;
 
     use super::*;
 
@@ -1561,12 +1561,12 @@ mod tests {
     #[test]
     fn canonical_dsh_kind_tokens_are_searchable() {
         let assistant = materialized_turnless_record(
-            TrajectoryItemId::Assistant(kcastle_agent::RequestId::from("request-1")),
+            TrajectoryItemId::Assistant(harness::RequestId::from("request-1")),
             TrajectoryKind::Assistant,
             "Assistant",
         );
         let compaction = materialized_turnless_record(
-            TrajectoryItemId::Compaction(kcastle_agent::CompactionId::from("compaction-1")),
+            TrajectoryItemId::Compaction(harness::CompactionId::from("compaction-1")),
             TrajectoryKind::Compaction,
             "Compaction",
         );
@@ -1578,7 +1578,7 @@ mod tests {
     #[test]
     fn turnless_records_are_searchable_as_between_turns() {
         let record = materialized_turnless_record(
-            TrajectoryItemId::Compaction(kcastle_agent::CompactionId::from("compaction-1")),
+            TrajectoryItemId::Compaction(harness::CompactionId::from("compaction-1")),
             TrajectoryKind::Compaction,
             "Compaction",
         );
@@ -1589,7 +1589,7 @@ mod tests {
     #[test]
     fn fold_eligibility_promotes_only_the_appended_suffix() {
         let mut assistant = materialized_turnless_record(
-            TrajectoryItemId::Assistant(kcastle_agent::RequestId::from("request-1")),
+            TrajectoryItemId::Assistant(harness::RequestId::from("request-1")),
             TrajectoryKind::Assistant,
             "Assistant",
         );
@@ -1600,7 +1600,7 @@ mod tests {
         assert!(initial.assistants.is_empty());
 
         let mut tool = materialized_turnless_record(
-            TrajectoryItemId::Tool(kcastle_agent::CallId::from_raw("call-1")),
+            TrajectoryItemId::Tool(harness::CallId::from_raw("call-1")),
             TrajectoryKind::Tool,
             "bash",
         );
@@ -1625,7 +1625,7 @@ mod tests {
         let mut eligibility = TrajectoryFoldEligibility::from_records(&records, None);
         for index in 0..RECORDS {
             let mut record = materialized_turnless_record(
-                TrajectoryItemId::Input(kcastle_agent::InputId::from_raw(format!("input-{index}"))),
+                TrajectoryItemId::Input(harness::InputId::from_raw(format!("input-{index}"))),
                 TrajectoryKind::User,
                 "User",
             );
@@ -1649,7 +1649,7 @@ mod tests {
     #[test]
     fn search_terms_match_independently_in_the_precomputed_record_text() {
         let record = TrajectoryRecord {
-            id: TrajectoryItemId::Assistant(kcastle_agent::RequestId::from("request-1")),
+            id: TrajectoryItemId::Assistant(harness::RequestId::from("request-1")),
             source_seq: 1,
             kind: TrajectoryKind::Assistant,
             title: "Assistant".into(),
@@ -1760,26 +1760,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (
-                    &TrajectoryRequestKey::Model(kcastle_agent::RequestId::from("request-1")),
+                    &TrajectoryRequestKey::Model(harness::RequestId::from("request-1")),
                     1,
                     TrajectoryRequestPurpose::Assistant,
                 ),
                 (
-                    &TrajectoryRequestKey::Compaction(kcastle_agent::CompactionId::from(
-                        "compaction-1",
-                    )),
+                    &TrajectoryRequestKey::Compaction(harness::CompactionId::from("compaction-1",)),
                     2,
                     TrajectoryRequestPurpose::Compaction,
                 ),
                 (
-                    &TrajectoryRequestKey::Model(kcastle_agent::RequestId::from("request-2")),
+                    &TrajectoryRequestKey::Model(harness::RequestId::from("request-2")),
                     3,
                     TrajectoryRequestPurpose::Assistant,
                 ),
             ]
         );
 
-        let first_key = TrajectoryRequestKey::Model(kcastle_agent::RequestId::from("request-1"));
+        let first_key = TrajectoryRequestKey::Model(harness::RequestId::from("request-1"));
         let first = projection.request_by_key(&first_key).unwrap();
         assert_eq!(projection.request_index(&first_key), Some(0));
         assert_eq!(first.turn, Some(1));
@@ -1789,17 +1787,14 @@ mod tests {
         assert_eq!(first.response_id.as_deref(), Some("response-1"));
         assert_eq!(first.response_model.as_deref(), Some("deepseek-v4"));
         let options = first.options.as_deref().unwrap();
-        assert_eq!(options.reason, kcastle_agent::RequestHeaderReason::Initial);
+        assert_eq!(options.reason, harness::RequestHeaderReason::Initial);
         assert_eq!(options.model.as_ref(), "deepseek-v4");
         assert_eq!(options.reasoning_effort, None);
         assert_eq!(options.max_output_tokens, Some(4_096));
-        assert_eq!(
-            options.session_config,
-            kcastle_agent::SessionConfig::default()
-        );
+        assert_eq!(options.session_config, harness::SessionConfig::default());
         assert_eq!(first.usage, Some(request_usage_fixture()));
         assert_eq!(first.cumulative_usage, first.usage);
-        let first_anchor = TrajectoryItemId::Assistant(kcastle_agent::RequestId::from("request-1"));
+        let first_anchor = TrajectoryItemId::Assistant(harness::RequestId::from("request-1"));
         assert_eq!(first.anchor.as_ref(), Some(&first_anchor));
         assert_eq!(first.result.as_ref(), Some(&first_anchor));
         assert_eq!(
@@ -1849,7 +1844,7 @@ mod tests {
         assert_eq!(failed.cumulative_usage, Some(expected_cumulative));
         assert_eq!(
             failed.anchor,
-            Some(TrajectoryItemId::Assistant(kcastle_agent::RequestId::from(
+            Some(TrajectoryItemId::Assistant(harness::RequestId::from(
                 "request-2"
             )))
         );
@@ -1920,7 +1915,7 @@ mod tests {
         assert!(Arc::ptr_eq(current, resumed_prompt));
         assert!(Arc::ptr_eq(previous.as_ref().unwrap(), first_prompt));
 
-        let tool_id = TrajectoryItemId::Tool(kcastle_agent::CallId::from("call-1"));
+        let tool_id = TrajectoryItemId::Tool(harness::CallId::from("call-1"));
         let details = projection.record_details(&tool_id).unwrap();
         let TrajectoryRecordDetails::Tool {
             request_key,
@@ -1968,9 +1963,9 @@ mod tests {
             })
             .collect();
         events.truncate(7);
-        let request_id = kcastle_agent::RequestId::from("request-1");
-        let parent_id = kcastle_agent::CallId::from("parent-call");
-        let child_id = kcastle_agent::CallId::from("child-call");
+        let request_id = harness::RequestId::from("request-1");
+        let parent_id = harness::CallId::from("parent-call");
+        let child_id = harness::CallId::from("child-call");
         for (seq, call_id, name) in [
             (7, parent_id.clone(), "parent"),
             (8, child_id.clone(), "child"),
@@ -1979,7 +1974,7 @@ mod tests {
                 seq,
                 SessionEvent::AssistantChunk {
                     request_id: request_id.clone(),
-                    chunk: kcastle_agent::AssistantChunk::ToolCallDelta {
+                    chunk: harness::AssistantChunk::ToolCallDelta {
                         call_id,
                         name: Some(name.to_owned()),
                         arguments_delta: "{}".to_owned(),
@@ -1987,8 +1982,8 @@ mod tests {
                 },
             ));
         }
-        let call_item = |call_id: &kcastle_agent::CallId, name: &str| {
-            serde_json::from_value::<kcastle_agent::InputItem>(serde_json::json!({
+        let call_item = |call_id: &harness::CallId, name: &str| {
+            serde_json::from_value::<harness::InputItem>(serde_json::json!({
                 "type": "function_call",
                 "arguments": "{}",
                 "call_id": call_id.as_str(),
@@ -2004,7 +1999,7 @@ mod tests {
                     call_item(&parent_id, "parent"),
                     call_item(&child_id, "child"),
                 ],
-                response: kcastle_agent::ResponseInfo {
+                response: harness::ResponseInfo {
                     id: "response".to_owned(),
                     model: "deepseek-v4".to_owned(),
                     usage: None,
@@ -2071,7 +2066,7 @@ mod tests {
         events.truncate(7);
         let mut document = SessionDocument::from_events(events.clone()).unwrap();
         let running = TrajectoryProjection::from_document(&document);
-        let key = TrajectoryRequestKey::Model(kcastle_agent::RequestId::from("request-1"));
+        let key = TrajectoryRequestKey::Model(harness::RequestId::from("request-1"));
         let request = running.request_by_key(&key).unwrap();
         assert_eq!(request.status, ItemStatus::Running);
         assert_eq!(request.turn, Some(1));
@@ -2095,9 +2090,9 @@ mod tests {
         let mut terminal_events = events.clone();
         terminal_events.push(crate::domain::session_document::tests::recorded(
             7,
-            kcastle_agent::SessionEvent::StepTerminated {
-                step_id: kcastle_agent::StepId::from("step-1"),
-                outcome: kcastle_agent::StepOutcome::Completed,
+            harness::SessionEvent::StepTerminated {
+                step_id: harness::StepId::from("step-1"),
+                outcome: harness::StepOutcome::Completed,
                 error: None,
             },
         ));
@@ -2119,8 +2114,8 @@ mod tests {
 
         let failure = crate::domain::session_document::tests::recorded(
             7,
-            kcastle_agent::SessionEvent::ModelRequestFailed {
-                request_id: kcastle_agent::RequestId::from("request-1"),
+            harness::SessionEvent::ModelRequestFailed {
+                request_id: harness::RequestId::from("request-1"),
                 error: "provider unavailable".to_owned(),
             },
         );
@@ -2159,23 +2154,22 @@ mod tests {
 
     #[test]
     fn retry_attempts_share_one_source_ordered_boundary_index() {
-        let run_id = kcastle_agent::RunId::from("run");
-        let turn_id = kcastle_agent::TurnId::from("turn");
-        let step_id = kcastle_agent::StepId::from("step");
-        let first_id = kcastle_agent::RequestId::from("request-1");
-        let second_id = kcastle_agent::RequestId::from("request-2");
-        let snapshot =
-            |request_id: kcastle_agent::RequestId, reason| SessionEvent::RequestSnapshot {
-                request_id,
-                step_id: step_id.clone(),
-                reason,
-                model: "model".to_owned(),
-                instructions: Some("instructions".to_owned()),
-                tools: Vec::new(),
-                reasoning_effort: None,
-                max_output_tokens: None,
-                session_config: kcastle_agent::SessionConfig::default(),
-            };
+        let run_id = harness::RunId::from("run");
+        let turn_id = harness::TurnId::from("turn");
+        let step_id = harness::StepId::from("step");
+        let first_id = harness::RequestId::from("request-1");
+        let second_id = harness::RequestId::from("request-2");
+        let snapshot = |request_id: harness::RequestId, reason| SessionEvent::RequestSnapshot {
+            request_id,
+            step_id: step_id.clone(),
+            reason,
+            model: "model".to_owned(),
+            instructions: Some("instructions".to_owned()),
+            tools: Vec::new(),
+            reasoning_effort: None,
+            max_output_tokens: None,
+            session_config: harness::SessionConfig::default(),
+        };
         let events = vec![
             crate::domain::session_document::tests::recorded(
                 0,
@@ -2190,16 +2184,13 @@ mod tests {
             crate::domain::session_document::tests::recorded(
                 2,
                 SessionEvent::StepStarted {
-                    turn_id: kcastle_agent::TurnId::from("turn"),
+                    turn_id: harness::TurnId::from("turn"),
                     step_id: step_id.clone(),
                 },
             ),
             crate::domain::session_document::tests::recorded(
                 3,
-                snapshot(
-                    first_id.clone(),
-                    kcastle_agent::RequestHeaderReason::Initial,
-                ),
+                snapshot(first_id.clone(), harness::RequestHeaderReason::Initial),
             ),
             crate::domain::session_document::tests::recorded(
                 4,
@@ -2216,10 +2207,7 @@ mod tests {
             ),
             crate::domain::session_document::tests::recorded(
                 6,
-                snapshot(
-                    second_id.clone(),
-                    kcastle_agent::RequestHeaderReason::Resume,
-                ),
+                snapshot(second_id.clone(), harness::RequestHeaderReason::Resume),
             ),
             crate::domain::session_document::tests::recorded(
                 7,
@@ -2231,7 +2219,7 @@ mod tests {
                 8,
                 SessionEvent::AssistantChunk {
                     request_id: second_id.clone(),
-                    chunk: kcastle_agent::AssistantChunk::OutputTextDelta {
+                    chunk: harness::AssistantChunk::OutputTextDelta {
                         delta: "recovered".to_owned(),
                     },
                 },
@@ -2259,7 +2247,7 @@ mod tests {
 
     #[test]
     fn turn_owned_compaction_uses_replayed_active_step_without_inventing_options() {
-        use kcastle_agent::{
+        use harness::{
             CompactionId, ResponseInfo, RunId, SessionEvent, StepId, StepOutcome, TokenUsage,
             TurnId,
         };
@@ -2369,9 +2357,9 @@ mod tests {
     #[test]
     fn ten_thousand_requests_update_the_tail_without_a_full_index_scan() {
         const REQUESTS: usize = 10_000;
-        let run_id = kcastle_agent::RunId::from("run");
-        let turn_id = kcastle_agent::TurnId::from("turn");
-        let step_id = kcastle_agent::StepId::from("step");
+        let run_id = harness::RunId::from("run");
+        let turn_id = harness::TurnId::from("turn");
+        let step_id = harness::StepId::from("step");
         let mut events = vec![
             crate::domain::session_document::tests::recorded(
                 0,
@@ -2398,19 +2386,19 @@ mod tests {
             events.push(crate::domain::session_document::tests::recorded(
                 u64::try_from(index).unwrap().saturating_add(3),
                 SessionEvent::RequestSnapshot {
-                    request_id: kcastle_agent::RequestId::from_raw(format!("request-{index}")),
+                    request_id: harness::RequestId::from_raw(format!("request-{index}")),
                     step_id: step_id.clone(),
                     reason: if index == 0 {
-                        kcastle_agent::RequestHeaderReason::Initial
+                        harness::RequestHeaderReason::Initial
                     } else {
-                        kcastle_agent::RequestHeaderReason::Resume
+                        harness::RequestHeaderReason::Resume
                     },
                     model: "model".to_owned(),
                     instructions: Some("shared instructions".to_owned()),
                     tools: Vec::new(),
                     reasoning_effort: None,
                     max_output_tokens: None,
-                    session_config: kcastle_agent::SessionConfig::default(),
+                    session_config: harness::SessionConfig::default(),
                 },
             ));
         }
@@ -2432,7 +2420,7 @@ mod tests {
         let first = Arc::clone(&projection.requests[0]);
         let materialized_before = projection.materialized_requests();
         let work_before = projection.request_index_work();
-        let tail_id = kcastle_agent::RequestId::from_raw(format!("request-{}", REQUESTS - 1));
+        let tail_id = harness::RequestId::from_raw(format!("request-{}", REQUESTS - 1));
         let delta = document
             .apply_batch(vec![crate::domain::session_document::tests::recorded(
                 u64::try_from(REQUESTS).unwrap().saturating_add(3),
@@ -2473,7 +2461,7 @@ mod tests {
                 u64::try_from(REQUESTS).unwrap().saturating_add(4),
                 SessionEvent::AssistantChunk {
                     request_id: tail_id,
-                    chunk: kcastle_agent::AssistantChunk::OutputTextDelta {
+                    chunk: harness::AssistantChunk::OutputTextDelta {
                         delta: "done".to_owned(),
                     },
                 },

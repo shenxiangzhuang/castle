@@ -54,13 +54,13 @@ only this finite abstraction, not arbitrary tool counts or unbounded crash histo
 | Property | Meaning | Implementation |
 | --- | --- | --- |
 | `TypeOK` | All reachable state has the declared shape | Model sanity check |
-| `ReceiptConsistency` | Live state never leads storage, and a ready owner has applied the current revision | `AgentLoop::commit_planned`, `acquire_writer_and_reload` in [agent_loop.rs](../../../../crates/agent/src/agent_loop.rs) |
+| `ReceiptConsistency` | Live state never leads storage, and a ready owner has applied the current revision | `AgentLoop::commit_planned`, `acquire_writer_and_reload` in [agent_loop.rs](../../../../crates/harness/src/agent_loop.rs) |
 | `AuthorizedEffects` | Each actual dispatch has durable authorization and dispatch intent | `AgentLoop::execute_tools` |
 | `NoRepeatedExecution` | Each modeled call is dispatched at most once, including recovery | `execute_tools`, `SessionMachine::plan_recovery` in [machine.rs](../../../../crates/agent/src/session/machine.rs) |
 | `PreserveDurableOutcomes` | Recovery cannot downgrade a committed success/error | `SessionMachine::plan_recovery` |
 | `OrderedAttachment` | Attached results form a prefix of declaration order | `AgentLoop::attach_ready_results`, `plan_recovery` |
 | `ResultConsistency` | Attached statuses agree with durable finishes/authorization | `SessionMachine` event and result validation |
-| `TerminalClosed` | The terminal commit closes the modeled lifecycles and resolves all tools | `plan_recovery`, `AgentLoop::terminate_after_error` |
+| `TerminalClosed` | The terminal commit closes the modeled lifecycles and resolves all tools | SDK `plan_recovery` / `plan_termination`, harness `AgentLoop::terminate_after_error` |
 | `StopSettles` | A stop request or crash eventually reaches a durable terminal state | Conditional progress requirement for cleanup/reopen |
 
 `StopSettles` uses weak fairness for receipt delivery/resolution, restart, and terminal
@@ -79,7 +79,7 @@ Existing implementation checks include:
   `recovery_distinguishes_finished_and_in_flight_parallel_tools`, and
   `recovery_is_one_batch_and_idempotent_after_apply` in `machine.rs`.
 - `committed_transaction_is_resolved_after_receipt_is_lost` and
-  `hard_kill_rolls_back_and_releases_writer` in [store.rs](../../../../crates/agent/src/session/store.rs),
+  `hard_kill_rolls_back_and_releases_writer` in [store.rs](../../../../crates/harness/src/session/store.rs),
   which exercise storage behavior assumed by the model.
 
 ## Sensitivity checks

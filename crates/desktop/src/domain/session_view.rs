@@ -507,7 +507,7 @@ fn semantic_hash(id: &ConversationItemId) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use kcastle_agent::{
+    use harness::{
         AssistantChunk, InputId, InputOrigin, RequestHeaderReason, RequestId, RunId, SessionConfig,
         SessionEvent, StepId, TurnId,
     };
@@ -671,9 +671,9 @@ mod tests {
                 SessionEvent::InputAttached {
                     input_id: InputId::from_raw(format!("history-{index}")),
                     step_id: step_id.clone(),
-                    items: vec![kcastle_agent::InputItem::from(
-                        kcastle_agent::EasyInputMessage::from(format!("history item {index}")),
-                    )],
+                    items: vec![harness::InputItem::from(harness::EasyInputMessage::from(
+                        format!("history item {index}"),
+                    ))],
                 },
             ));
             seq = seq.saturating_add(1);

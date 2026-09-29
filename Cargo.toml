@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent", "crates/desktop", "vendor/xim-ctext"]
+members = ["crates/agent", "crates/harness", "crates/desktop", "vendor/xim-ctext"]
 exclude = ["fuzz"]
 resolver = "3"
 
@@ -8,10 +8,10 @@ version = "0.2.0-alpha.32"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
-repository = "https://github.com/shenxiangzhuang/kcastle"
+repository = "https://github.com/shenxiangzhuang/castle"
 
 [workspace.dependencies]
-async-openai = { version = "=0.41.3", default-features = false, features = ["responses", "rustls"] }
+async-openai = { version = "=0.41.3", default-features = false, features = ["response-types"] }
 futures-util = "=0.3.34"
 im = "=15.1.0"
 gpui-kit = { version = "=0.7.0", features = ["tree-sitter-languages"] }
@@ -36,7 +36,8 @@ tree-sitter-haskell = "=0.23.1"
 tree-sitter = "=0.26.13"
 velopack = "=1.2.110-ge826545"
 
-kcastle-agent = { path = "crates/agent", version = "=0.2.0-alpha.32" }
+agent = { path = "crates/agent" }
+harness = { path = "crates/harness" }
 
 [profile.release]
 codegen-units = 1

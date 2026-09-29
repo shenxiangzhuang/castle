@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kcastle_agent::{
-    Session, SessionCatalog, SessionError, SessionErrorClass, SessionId, SessionInfo,
-};
+use harness::{Session, SessionCatalog, SessionError, SessionErrorClass, SessionId, SessionInfo};
 
 use crate::project::{ProjectId, ProjectStore};
 

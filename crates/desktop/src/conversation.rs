@@ -1096,8 +1096,8 @@ mod tests {
     #[gpui_kit::test]
     fn chat_only_prepares_the_viewport(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!(
-            "kcastle-chat-viewport-{}",
-            kcastle_agent::SessionId::new()
+            "castle-chat-viewport-{}",
+            harness::SessionId::new()
         ));
         let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
         cx.update(crate::init_ui);
@@ -1270,7 +1270,7 @@ mod tests {
         }
 
         let root = std::env::temp_dir().join(format!(
-            "kcastle-selection-allocation-{}-{}",
+            "castle-selection-allocation-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

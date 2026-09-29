@@ -19,7 +19,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowOptions, accesskit::Role, div, px, size,
 };
-use kcastle_agent::{Agent, Session};
+use harness::{Session, SessionSetup};
 
 mod agent_config;
 mod app;
@@ -58,10 +58,13 @@ use assets::DesktopAssets;
 use project::ProjectStore;
 use settings::{Appearance, ProviderProfile, SettingsStore};
 
-pub(crate) const APP_NAME: &str = "Kcastle";
-const DATA_ROOT_ENV: &str = "KCASTLE_DATA_DIR";
+gpui_kit::actions!(castle, [Quit]);
+
+pub(crate) const APP_NAME: &str = "Castle";
+const DATA_ROOT_ENV: &str = "CASTLE_DATA_DIR";
 
 fn init_ui(cx: &mut App) {
+    cx.set_global(crate::platform::gpui::ApplicationHarness::default());
     gpui_kit::init(cx);
     register_syntax_languages();
 }
@@ -110,8 +113,36 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         cx.activate(true);
     });
+    let harness = harness::Harness::default();
+    let app_harness = harness.clone();
     application.run(move |cx| {
         init_ui(cx);
+        cx.set_global(crate::platform::gpui::ApplicationHarness(
+            app_harness.clone(),
+        ));
+        let quit_harness = app_harness.clone();
+        cx.on_app_quit(move |_| {
+            let harness = quit_harness.clone();
+            async move { harness.shutdown().await }
+        })
+        .detach();
+        cx.on_action(move |_: &Quit, cx| {
+            let harness = app_harness.clone();
+            cx.spawn(async move |cx| {
+                harness.shutdown().await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+        let shortcut = if cfg!(target_os = "macos") {
+            "cmd-q"
+        } else {
+            "ctrl-q"
+        };
+        cx.bind_keys([gpui_kit::KeyBinding::new(shortcut, Quit, None)]);
+        cx.set_menus([
+            gpui_kit::Menu::new(APP_NAME).items([gpui_kit::MenuItem::action("Quit Castle", Quit)])
+        ]);
         let result = match startup {
             Ok((startup, appearance)) => open_desktop_window(startup, appearance, cx),
             Err(error) => open_startup_error_window(error, cx),
@@ -121,6 +152,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         }
         cx.activate(true);
     });
+    runtime.block_on(harness.shutdown());
     Ok(())
 }
 
@@ -154,7 +186,7 @@ fn desktop_startup(root: PathBuf) -> Result<(DesktopStartup, Appearance), Box<dy
     let project = projects
         .project(active_project)
         .ok_or("project store has no active project")?;
-    let agent = Agent::new(model, INSTRUCTIONS, Session::memory(), project.path.clone());
+    let agent = SessionSetup::new(model, INSTRUCTIONS, Session::memory(), project.path.clone());
     Ok((
         DesktopStartup {
             agent,
@@ -208,7 +240,7 @@ fn desktop_window_options(cx: &App) -> WindowOptions {
             traffic_light_position: None,
         }),
         window_background: WindowBackgroundAppearance::Blurred,
-        app_id: Some("dev.kcastle.desktop".into()),
+        app_id: Some("dev.castle.desktop".into()),
         ..Default::default()
     }
 }
@@ -227,7 +259,7 @@ impl Render for StartupErrorView {
         div()
             .id("startup-error")
             .role(Role::Alert)
-            .aria_label("Kcastle startup error")
+            .aria_label("Castle startup error")
             .size_full()
             .flex()
             .items_center()
@@ -242,7 +274,7 @@ impl Render for StartupErrorView {
                     .border_1()
                     .border_color(colors.border)
                     .bg(colors.surface)
-                    .child(div().text_xl().child("Kcastle couldn't start"))
+                    .child(div().text_xl().child("Castle couldn't start"))
                     .child(
                         div()
                             .mt_3()
@@ -255,7 +287,7 @@ impl Render for StartupErrorView {
                             .mt_3()
                             .text_sm()
                             .text_color(colors.muted_text)
-                            .child("Close Kcastle and reopen it after fixing the problem."),
+                            .child("Close Castle and reopen it after fixing the problem."),
                     ),
             )
     }
@@ -289,24 +321,24 @@ fn data_root() -> Result<PathBuf, Box<dyn Error>> {
         env::var_os("HOME"),
         env::var_os("USERPROFILE"),
     )
-    .map_err(Into::into)
 }
 
 fn resolve_data_root(
     override_root: Option<OsString>,
     home: Option<OsString>,
     user_profile: Option<OsString>,
-) -> Result<PathBuf, &'static str> {
+) -> Result<PathBuf, Box<dyn Error>> {
     if let Some(root) = override_root {
         if root.is_empty() {
-            return Err("KCASTLE_DATA_DIR cannot be empty");
+            return Err("CASTLE_DATA_DIR cannot be empty".into());
         }
         return Ok(PathBuf::from(root));
     }
-    home.or(user_profile)
+    let home = home
+        .or(user_profile)
         .map(PathBuf::from)
-        .map(|home| home.join(".kcastle"))
-        .ok_or("cannot locate the home directory")
+        .ok_or("cannot locate the home directory")?;
+    AppStore::default_root(&home)
 }
 
 #[cfg(test)]
@@ -346,11 +378,11 @@ mod tests {
     fn data_root_defaults_to_the_home_directory() {
         assert_eq!(
             resolve_data_root(None, Some(OsString::from("/users/test")), None).unwrap(),
-            PathBuf::from("/users/test/.kcastle")
+            PathBuf::from("/users/test/.castle")
         );
         assert_eq!(
             resolve_data_root(None, None, Some(OsString::from("C:/Users/test"))).unwrap(),
-            PathBuf::from("C:/Users/test/.kcastle")
+            PathBuf::from("C:/Users/test/.castle")
         );
     }
 
@@ -358,12 +390,12 @@ mod tests {
     fn data_root_override_is_verbatim_and_must_not_be_empty() {
         assert_eq!(
             resolve_data_root(
-                Some(OsString::from("/tmp/kcastle-acceptance")),
+                Some(OsString::from("/tmp/castle-acceptance")),
                 Some(OsString::from("/users/test")),
                 None,
             )
             .unwrap(),
-            PathBuf::from("/tmp/kcastle-acceptance")
+            PathBuf::from("/tmp/castle-acceptance")
         );
         assert_eq!(
             resolve_data_root(
@@ -375,8 +407,10 @@ mod tests {
             PathBuf::from("relative/acceptance")
         );
         assert_eq!(
-            resolve_data_root(Some(OsString::new()), None, None),
-            Err("KCASTLE_DATA_DIR cannot be empty")
+            resolve_data_root(Some(OsString::new()), None, None)
+                .unwrap_err()
+                .to_string(),
+            "CASTLE_DATA_DIR cannot be empty"
         );
     }
 
@@ -386,7 +420,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("kcastle-reopen-test-{suffix}"));
+        let root = std::env::temp_dir().join(format!("castle-reopen-test-{suffix}"));
         let (first, first_appearance) = desktop_startup(root.clone()).unwrap();
         let model_count = first.models.len();
         drop(first);

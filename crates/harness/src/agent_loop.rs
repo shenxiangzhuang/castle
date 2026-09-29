@@ -1,3 +1,7 @@
+#[cfg(test)]
+use crate::InputOrigin;
+#[cfg(test)]
+use async_openai::types::responses::EasyInputMessage;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -5,9 +9,8 @@ use std::time::Duration;
 mod control;
 
 use async_openai::types::responses::{
-    CreateResponseArgs, EasyInputMessage, FunctionCallOutputItemParam, FunctionToolCall, InputItem,
-    Item, OutputItem, Reasoning, ReasoningEffort as ProviderReasoningEffort, Response,
-    ResponseStreamEvent,
+    CreateResponseArgs, FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item, OutputItem,
+    Reasoning, ReasoningEffort as ProviderReasoningEffort, Response, ResponseStreamEvent,
 };
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
@@ -19,15 +22,15 @@ use crate::context::compaction::{SUMMARY_INSTRUCTIONS, context_tokens, prepare_c
 use crate::model::ReasoningEffort;
 use crate::session::SessionError;
 use crate::session::event::{
-    AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin, RequestId,
-    ResponseInfo, RunId, RunOutcome, SessionEvent, StepId, StepOutcome, ToolAuthorizationDecision,
+    AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, RequestId, ResponseInfo,
+    RunId, RunOutcome, SessionEvent, StepId, StepOutcome, ToolAuthorizationDecision,
     ToolExecutionOutcome, ToolResultStatus, TurnEndReason, TurnId, TxId,
 };
 use crate::session::machine::{PlannedBatch, SessionMachine};
 use crate::session::store::{AppendTx, CommitReceipt, SessionStoreError};
 use crate::tools::ToolResult;
 pub use control::{ActiveAgent, AgentError, AgentEvent, RunControl, RunFailure, RunSummary};
-use control::{ApprovalCommand, InputCommand, RunChannels};
+use control::{ApprovalCommand, InputAction, InputCommand, RunChannels};
 
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(32);
 
@@ -75,6 +78,7 @@ impl AgentLoop {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn start(agent: Agent, input: String) -> ActiveAgent {
     spawn(agent, Operation::Run(Some((InputId::random(), input))))
 }
@@ -103,6 +107,7 @@ pub(crate) fn edit_input(
     )
 }
 
+#[cfg(test)]
 pub(crate) async fn select_conversation(
     agent: Agent,
     target: Option<u64>,
@@ -456,54 +461,23 @@ impl AgentLoop {
         if channels.cancel.is_cancelled() {
             return Err(AgentError::Aborted);
         }
-        let mut initial = Vec::new();
-        if let Some(head) = selected_head {
-            initial.push(SessionEvent::ConversationHeadSelected { head });
-        }
-        let (input_id, input) = if let Some((input_id, input)) = input {
-            if input.trim().is_empty() {
-                return Err(AgentError::EmptyInput);
-            }
-            initial.push(SessionEvent::InputSubmitted {
-                input_id: input_id.clone(),
-                input: input.clone(),
-                origin: InputOrigin::Initial,
-            });
-            (input_id, input)
-        } else {
-            let pending = self
-                .pending_input(InputOrigin::Steer)
-                .or_else(|| self.pending_input(InputOrigin::Queue))
-                .ok_or_else(|| AgentError::Task("no pending messages".into()))?;
-            (pending.input_id, pending.input)
+        let transition = self.agent.machine.transition(
+            ::agent::AgentInput::Start {
+                input,
+                selected_head,
+                run: RunId::random(),
+                turn: TurnId::random(),
+                step: StepId::random(),
+            },
+            TxId::random(),
+            self.agent.clock.now(),
+        )?;
+        let (batch, effect) = transition.into_parts();
+        self.commit_planned(batch, events).await?;
+        let ::agent::AgentEffect::RequestModel { step } = effect else {
+            return Err(AgentError::Task("start did not request a model".into()));
         };
-
-        let run_id = RunId::random();
-        let turn_id = TurnId::random();
-        let step_id = StepId::random();
-        let items = user_items(input);
-        initial.extend([
-            SessionEvent::RunStarted {
-                run_id: run_id.clone(),
-            },
-            SessionEvent::TurnStarted {
-                run_id: run_id.clone(),
-                turn_id: turn_id.clone(),
-            },
-            SessionEvent::StepStarted {
-                turn_id: turn_id.clone(),
-                step_id: step_id.clone(),
-            },
-            SessionEvent::InputAttached {
-                input_id,
-                step_id: step_id.clone(),
-                items,
-            },
-        ]);
-        self.commit_now(initial, events).await?;
-        let result = self
-            .run_loop(run_id, turn_id, step_id, &mut channels, events)
-            .await;
+        let result = self.run_loop(step, &mut channels, events).await;
         match result {
             Ok(summary) => {
                 publish(events, AgentEvent::RunFinished(summary));
@@ -515,8 +489,6 @@ impl AgentLoop {
 
     async fn run_loop(
         &mut self,
-        run_id: RunId,
-        mut turn_id: TurnId,
         mut step_id: StepId,
         channels: &mut RunChannels,
         events: &EventSink,
@@ -555,110 +527,21 @@ impl AgentLoop {
                 return Err(AgentError::Aborted);
             }
 
-            if let Some(input) = self.pending_input(InputOrigin::Steer) {
-                let next_step = StepId::random();
-                self.commit_now(
-                    vec![
-                        SessionEvent::StepTerminated {
-                            step_id: step_id.clone(),
-                            outcome: StepOutcome::Completed,
-                            error: None,
-                        },
-                        SessionEvent::StepStarted {
-                            turn_id: turn_id.clone(),
-                            step_id: next_step.clone(),
-                        },
-                        SessionEvent::InputAttached {
-                            input_id: input.input_id,
-                            step_id: next_step.clone(),
-                            items: user_items(input.input),
-                        },
-                    ],
-                    events,
-                )
-                .await?;
-                step_id = next_step;
-                continue;
+            let transition = self.agent.machine.transition(
+                ::agent::AgentInput::StepCompleted {
+                    had_tools: !calls.is_empty(),
+                    next_turn: TurnId::random(),
+                    next_step: StepId::random(),
+                },
+                TxId::random(),
+                self.agent.clock.now(),
+            )?;
+            let (batch, effect) = transition.into_parts();
+            self.commit_planned(batch, events).await?;
+            match effect {
+                ::agent::AgentEffect::RequestModel { step } => step_id = step,
+                ::agent::AgentEffect::Finished => return Ok(summary),
             }
-
-            if !calls.is_empty() {
-                let next_step = StepId::random();
-                self.commit_now(
-                    vec![
-                        SessionEvent::StepTerminated {
-                            step_id: step_id.clone(),
-                            outcome: StepOutcome::Completed,
-                            error: None,
-                        },
-                        SessionEvent::StepStarted {
-                            turn_id: turn_id.clone(),
-                            step_id: next_step.clone(),
-                        },
-                    ],
-                    events,
-                )
-                .await?;
-                step_id = next_step;
-                continue;
-            }
-
-            if let Some(input) = self.pending_input(InputOrigin::Queue) {
-                let next_turn = TurnId::random();
-                let next_step = StepId::random();
-                self.commit_now(
-                    vec![
-                        SessionEvent::StepTerminated {
-                            step_id: step_id.clone(),
-                            outcome: StepOutcome::Completed,
-                            error: None,
-                        },
-                        SessionEvent::TurnTerminated {
-                            turn_id: turn_id.clone(),
-                            reason: TurnEndReason::Completed,
-                        },
-                        SessionEvent::TurnStarted {
-                            run_id: run_id.clone(),
-                            turn_id: next_turn.clone(),
-                        },
-                        SessionEvent::StepStarted {
-                            turn_id: next_turn.clone(),
-                            step_id: next_step.clone(),
-                        },
-                        SessionEvent::InputAttached {
-                            input_id: input.input_id,
-                            step_id: next_step.clone(),
-                            items: user_items(input.input),
-                        },
-                    ],
-                    events,
-                )
-                .await?;
-                turn_id = next_turn;
-                step_id = next_step;
-                continue;
-            }
-
-            self.commit_now(
-                vec![
-                    SessionEvent::StepTerminated {
-                        step_id,
-                        outcome: StepOutcome::Completed,
-                        error: None,
-                    },
-                    SessionEvent::TurnTerminated {
-                        turn_id,
-                        reason: TurnEndReason::Completed,
-                    },
-                    SessionEvent::RunTerminated {
-                        run_id,
-                        outcome: RunOutcome::Completed,
-                        error: None,
-                    },
-                ],
-                events,
-            )
-            .await?;
-            return Ok(summary);
         }
     }
 
@@ -1349,9 +1232,23 @@ impl AgentLoop {
         events: &EventSink,
     ) -> Result<(), AgentError> {
         let InputCommand {
-            event,
+            action,
             acknowledgement,
         } = command;
+        let event = match action {
+            InputAction::Event(event) => *event,
+            InputAction::Permission(allow) => {
+                let mut config = self.agent.session_config.clone();
+                config.allow_all_tools = allow;
+                let result = self.agent.persist_session_config(&config).await;
+                if result.is_ok() {
+                    publish(events, AgentEvent::ConfigChanged(config));
+                }
+                let _ =
+                    acknowledgement.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+                return result;
+            }
+        };
         let committed = self.commit_now(vec![event], events).await;
         match committed {
             Ok(_) => {
@@ -1369,14 +1266,6 @@ impl AgentLoop {
                 if rejected { Ok(()) } else { Err(error) }
             }
         }
-    }
-
-    fn pending_input(&self, origin: InputOrigin) -> Option<crate::session::machine::PendingInput> {
-        self.agent
-            .machine
-            .pending_inputs()
-            .into_iter()
-            .find(|input| input.origin == origin)
     }
 
     fn resolved_model_config(&self) -> Result<ResolvedModelConfig, AgentError> {
@@ -1548,76 +1437,21 @@ impl AgentLoop {
         error: &AgentError,
         events: &EventSink,
     ) -> Result<(), AgentError> {
-        let outcome = if aborted {
-            RunOutcome::Aborted
-        } else {
-            RunOutcome::Failed
-        };
-        let step_outcome = if aborted {
-            StepOutcome::Aborted
-        } else {
-            StepOutcome::Failed
-        };
-        let turn_reason = if aborted {
+        let reason = if aborted {
             TurnEndReason::Aborted
         } else if matches!(error, AgentError::MaxTurns(_)) {
             TurnEndReason::MaxTurns
         } else {
             TurnEndReason::Failed
         };
-        let time = self.agent.clock.now();
-        let Some(recovery) = self
-            .agent
-            .machine
-            .plan_recovery(TxId::random(), time.clone())?
-        else {
-            return Ok(());
-        };
-        let message = error.to_string();
-        let terminal = recovery
-            .into_events()
-            .into_iter()
-            .map(|recorded| {
-                let event = match recorded.event {
-                    SessionEvent::ModelRequestFailed { request_id, .. } => {
-                        SessionEvent::ModelRequestFailed {
-                            request_id,
-                            error: message.clone(),
-                        }
-                    }
-                    SessionEvent::CompactionFinished {
-                        compaction_id,
-                        summary,
-                        response,
-                        ..
-                    } => SessionEvent::CompactionFinished {
-                        compaction_id,
-                        outcome: step_outcome,
-                        summary,
-                        response,
-                    },
-                    SessionEvent::StepTerminated { step_id, .. } => SessionEvent::StepTerminated {
-                        step_id,
-                        outcome: step_outcome,
-                        error: Some(message.clone()),
-                    },
-                    SessionEvent::TurnTerminated { turn_id, .. } => SessionEvent::TurnTerminated {
-                        turn_id,
-                        reason: turn_reason,
-                    },
-                    SessionEvent::RunTerminated { run_id, .. } => SessionEvent::RunTerminated {
-                        run_id,
-                        outcome,
-                        error: Some(message.clone()),
-                    },
-                    event => event,
-                };
-                ObservedEvent::new(recorded.time, event)
-            })
-            .collect();
-        // Tool/compaction/request closure and step/turn/run termination are one all-or-nothing
-        // transaction. There is no partially terminal durable state to recover from later.
-        self.commit_observed(terminal, events).await?;
+        if let Some(batch) = self.agent.machine.plan_termination(
+            reason,
+            error.to_string(),
+            TxId::random(),
+            self.agent.clock.now(),
+        )? {
+            self.commit_planned(batch, events).await?;
+        }
         Ok(())
     }
 
@@ -1903,6 +1737,7 @@ fn reject_inactive_approval(approval: Option<ApprovalCommand>) {
     )));
 }
 
+#[cfg(test)]
 fn user_items(message: String) -> Vec<InputItem> {
     vec![InputItem::from(EasyInputMessage::from(message))]
 }
@@ -1936,7 +1771,7 @@ fn millis_to_seconds(millis: i64) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2158,12 +1993,12 @@ mod tests {
 
     fn temp_directory(label: &str) -> PathBuf {
         let directory =
-            std::env::temp_dir().join(format!("kcastle-agent-v2-{label}-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("castle-agent-v2-{label}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         directory
     }
 
-    async fn read_http_request(socket: &mut TcpStream) {
+    pub(crate) async fn read_http_request(socket: &mut TcpStream) {
         let mut request = Vec::new();
         let (body_start, content_length) = loop {
             let mut chunk = [0; 4096];
@@ -2193,7 +2028,11 @@ mod tests {
         }
     }
 
-    async fn write_text_stream_response(socket: &mut TcpStream, text: &str, response_id: &str) {
+    pub(crate) async fn write_text_stream_response(
+        socket: &mut TcpStream,
+        text: &str,
+        response_id: &str,
+    ) {
         let body = format!(
             "data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"{text}\"}}\n\ndata: {{\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{{\"created_at\":0,\"id\":\"{response_id}\",\"model\":\"test-model\",\"object\":\"response\",\"output\":[{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"annotations\":[],\"text\":\"{text}\"}}],\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\"}}],\"status\":\"completed\"}}}}\n\n"
         );
@@ -2204,7 +2043,9 @@ mod tests {
         socket.write_all(response.as_bytes()).await.unwrap();
     }
 
-    async fn text_stream_model(text: &'static str) -> (Model, tokio::task::JoinHandle<()>) {
+    pub(crate) async fn text_stream_model(
+        text: &'static str,
+    ) -> (Model, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -2258,7 +2099,7 @@ mod tests {
         )
     }
 
-    async fn gated_two_request_text_stream_model(
+    pub(crate) async fn gated_two_request_text_stream_model(
         text: &'static str,
     ) -> (
         Model,
@@ -2589,7 +2430,7 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_edit_fork_reopen_and_search_are_path_local() {
-        let directory = std::env::temp_dir().join(format!("kcastle-tree-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!("castle-tree-{}", uuid::Uuid::new_v4()));
         let session = Session::create(&directory).await.unwrap();
         let (model, server) = text_stream_model("original-answer").await;
         let mut agent = Agent::new(model, "test instructions", session, ".")

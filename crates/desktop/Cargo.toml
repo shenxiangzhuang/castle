@@ -56,6 +56,9 @@ objc2-quartz-core = { version = "=0.3.2", default-features = false, features = [
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGPath"] }
 raw-window-handle = "=0.6.2"
 
+[build-dependencies]
+embed-resource = "=3.0.11"
+
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 proptest.workspace = true

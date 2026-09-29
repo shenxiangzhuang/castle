@@ -4,6 +4,11 @@ Status: accepted
 
 ## Decision
 
+The [core architecture](overview.md) defines the interaction boundary: desktop sends
+harness commands and projects snapshots/events. It does not own execution, authorization policy,
+configuration persistence, or task settlement. GPUI `SessionRuntime` owns only the projection and
+command acknowledgments; execution and resource settlement live in `harness`.
+
 The desktop builds one canonical `SessionDocument` from committed transactions. Conversation,
 trajectory, timing, details, search, and composer statistics are selectors over that document.
 Transient interaction state such as hover, selection, viewport, expanded rows, and active details
@@ -41,9 +46,17 @@ The [session protocol](session.md) owns durable facts and lifecycle validation.
 Each GPUI `SessionRuntime` owns one mutable `SessionDocument` and publishes one immutable
 `Arc<SessionView>`. `SessionMachine` is the sole semantic validator: the desktop only preflights the
 committed event cursor before applying a complete batch, so it cannot partially project a transport
-gap and does not maintain a second lifecycle state machine. Applying a committed batch produces a
+gap and does not maintain a second domain lifecycle validator. Its runtime status is a harness snapshot,
+not a second execution state machine. Applying a committed batch produces a
 small patch of changed stable IDs; persistent maps and vectors share untouched structure and
 preserve stable record arcs.
+
+Views dispatch actions; `domain`, `layout`, and `application` stay GPUI-free. GPUI lifecycle
+calls stay in `platform/gpui`, and native titlebar integration in `platform/native_titlebar.rs`.
+Session metadata and committed update times are cached outside rendering; opaque session locators
+are never treated as data files. A collapsed live Think row shows the latest non-blank reasoning
+line and follows its horizontal tail at most once every three display frames. Expanding shows all
+reasoning; settlement immediately restores the stable first line.
 
 ### Framework controls
 
@@ -367,13 +380,13 @@ are shown alongside selectable source. Windows requires the
 WebView2 runtime. Cross-platform native behavior must be verified on each target OS.
 
 For repeatable native checks without providers or private sessions, the **debug full application**
-accepts `KCASTLE_PREVIEW_MARKDOWN`. The release binary does not contain this fixture entry point:
+accepts `CASTLE_PREVIEW_MARKDOWN`. The release binary does not contain this fixture entry point:
 
 ```sh
 just macos-app-debug
-KCASTLE_DATA_DIR=/tmp/kcastle-html-check \
-KCASTLE_PREVIEW_MARKDOWN="$PWD/crates/desktop/tests/fixtures/html-previews.md" \
-  target/Kcastle.app/Contents/MacOS/kcastle
+CASTLE_DATA_DIR=/tmp/castle-html-check \
+CASTLE_PREVIEW_MARKDOWN="$PWD/crates/desktop/tests/fixtures/html-previews.md" \
+  target/Castle.app/Contents/MacOS/castle
 ```
 
 Use the two independent sliders, expand/collapse the explanation, scroll both documents fully
@@ -521,19 +534,14 @@ in-progress drag is the only additional interaction state.
 
 ## Desktop updates
 
-`updater.rs` derives the release channel from the application version and selects a feed by
-OS and the running binary's architecture. macOS uses `osx-arm64` or `osx-x64`; a Universal
-bridge uses the same selection in each compiled slice. An explicitly Rosetta-launched Intel
-slice follows the Intel feed. The package ID and channel remain unchanged across the split.
+`updater.rs` derives the release channel from the application version and selects the Castle
+feed by OS and running architecture under `castle/<channel>/<target>/`. macOS uses
+`osx-arm64` or `osx-x64`; a Rosetta-launched Intel binary follows the Intel feed.
 
-The download/pending-restart lifecycle remains owned by Velopack. Updates use full packages;
-only a higher version is accepted, and restart is blocked while sessions are active. Changing
-the feed directory does not change journal storage, session cancellation, or restart ownership.
-
-The [release protocol](../development/release.md#macos-architecture-split) retains the final
-Universal bridge and its feed indefinitely. Legacy clients first install that bridge, then a
-higher native version. Later releases leave the old prefix untouched. Availability of the
-frozen feed/packages is a deployment assumption, not a property of the session or Chat models.
+Velopack owns download and pending restart. Only higher full-package versions are accepted;
+restart is blocked while sessions are active. The new `Castle` package identity requires a
+one-time installation; old product feeds remain separate. See the
+[release protocol](../development/release.md#castle-identity-and-update-hosting).
 
 ## Composer and pending messages
 

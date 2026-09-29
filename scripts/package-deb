@@ -9,24 +9,24 @@ trap 'rm -rf "$work"' EXIT
 root="$work/root"
 
 version=$(cargo metadata --no-deps --format-version 1 --manifest-path "$repo/Cargo.toml" \
-    | jq -r '.packages[] | select(.name == "kcastle-desktop") | .version')
+    | jq -r '.packages[] | select(.name == "desktop") | .version')
 debian_version=$(printf '%s\n' "$version" | sed 's/-/~/')
 architecture=$(dpkg --print-architecture)
 
 mkdir -p "$work/debian" "$root/DEBIAN" "$root/usr/bin" \
-    "$root/usr/share/applications" "$root/usr/share/doc/kcastle-desktop" \
+    "$root/usr/share/applications" "$root/usr/share/doc/castle-desktop" \
     "$root/usr/share/icons/hicolor/512x512/apps"
-printf 'Source: kcastle-desktop\nSection: utils\nPriority: optional\nMaintainer: kcastle contributors <shenxiangzhuang@users.noreply.github.com>\n\nPackage: kcastle-desktop\nArchitecture: any\nDescription: Native desktop interface for kcastle-agent\n' \
+printf 'Source: castle-desktop\nSection: utils\nPriority: optional\nMaintainer: castle contributors <shenxiangzhuang@users.noreply.github.com>\n\nPackage: castle-desktop\nArchitecture: any\nDescription: Native desktop interface for Castle\n' \
     > "$work/debian/control"
 depends=$(cd "$work" && dpkg-shlibdeps -O -e"$binary" | sed -n 's/^shlibs:Depends=//p')
 
-install -m 755 "$binary" "$root/usr/bin/kcastle-desktop"
-install -m 644 "$repo/crates/desktop/resources/kcastle.desktop" \
-    "$root/usr/share/applications/kcastle.desktop"
+install -m 755 "$binary" "$root/usr/bin/castle-desktop"
+install -m 644 "$repo/crates/desktop/resources/castle.desktop" \
+    "$root/usr/share/applications/castle.desktop"
 install -m 644 "$repo/crates/desktop/assets/app-icon-512.png" \
-    "$root/usr/share/icons/hicolor/512x512/apps/kcastle.png"
-install -m 644 "$repo/LICENSE" "$root/usr/share/doc/kcastle-desktop/copyright"
-printf 'Package: kcastle-desktop\nVersion: %s\nArchitecture: %s\nMaintainer: kcastle contributors <shenxiangzhuang@users.noreply.github.com>\nDepends: %s\nSection: utils\nPriority: optional\nDescription: Native desktop interface for kcastle-agent\n' \
+    "$root/usr/share/icons/hicolor/512x512/apps/castle.png"
+install -m 644 "$repo/LICENSE" "$root/usr/share/doc/castle-desktop/copyright"
+printf 'Package: castle-desktop\nVersion: %s\nArchitecture: %s\nMaintainer: castle contributors <shenxiangzhuang@users.noreply.github.com>\nDepends: %s\nSection: utils\nPriority: optional\nDescription: Native desktop interface for Castle\n' \
     "$debian_version" "$architecture" "$depends" > "$root/DEBIAN/control"
 
 dpkg-deb --root-owner-group --build "$root" "$output"

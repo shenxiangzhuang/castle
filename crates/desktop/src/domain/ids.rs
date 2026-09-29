@@ -24,7 +24,8 @@ pub(crate) fn next_message_id() -> MessageId {
     MessageId(NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-numeric_id!(RunId);
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct RunId(pub(crate) u64);
 numeric_id!(LayoutGeneration);
 use std::sync::atomic::{AtomicU64, Ordering};
 

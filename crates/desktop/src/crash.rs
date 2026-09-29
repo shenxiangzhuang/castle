@@ -67,7 +67,7 @@ fn report(message: &str, location: &str, backtrace: &Backtrace) -> String {
         .unwrap_or_default()
         .as_secs();
     format!(
-        "\n--- kcastle panic ---\nunix_time={timestamp}\nversion={}\npid={}\nlocation={location}\nmessage={message}\nbacktrace:\n{backtrace}\n",
+        "\n--- castle panic ---\nunix_time={timestamp}\nversion={}\npid={}\nlocation={location}\nmessage={message}\nbacktrace:\n{backtrace}\n",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
     )
@@ -92,7 +92,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let path = std::env::temp_dir().join(format!(
-            "kcastle-panic-log-permissions-{}-{}",
+            "castle-panic-log-permissions-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -6036,7 +6036,7 @@ fn prompt_tools_panel(prompt: &PromptSnapshot, colors: TrajectoryPalette) -> gpu
         .into_any_element()
 }
 
-fn usage_summary(usage: kcastle_agent::TokenUsage, colors: TrajectoryPalette) -> gpui_kit::Div {
+fn usage_summary(usage: harness::TokenUsage, colors: TrajectoryPalette) -> gpui_kit::Div {
     div()
         .flex()
         .flex_col()
@@ -6083,9 +6083,9 @@ fn request_options_details(
     colors: TrajectoryPalette,
 ) -> gpui_kit::AnyElement {
     let reason = match options.reason {
-        kcastle_agent::RequestHeaderReason::Initial => "Initial",
-        kcastle_agent::RequestHeaderReason::Resume => "Resume",
-        kcastle_agent::RequestHeaderReason::Change => "Change",
+        harness::RequestHeaderReason::Initial => "Initial",
+        harness::RequestHeaderReason::Resume => "Resume",
+        harness::RequestHeaderReason::Change => "Change",
     };
     let mut body = div()
         .flex()
@@ -6334,8 +6334,8 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    use harness::{AssistantChunk, CallId, EventTime, RequestId, SessionEvent, TokenUsage};
     use im::{HashSet as ImHashSet, Vector};
-    use kcastle_agent::{AssistantChunk, CallId, EventTime, RequestId, SessionEvent, TokenUsage};
 
     use crate::domain::session_document::SessionDocument;
     use crate::domain::session_document::tests::{fixture, recorded};

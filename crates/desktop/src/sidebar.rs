@@ -243,7 +243,7 @@ impl DesktopApp {
                                     .flex_none()
                                     .child(
                                         Button::new("sort-sessions")
-                                            .accessibility_id("kcastle.sidebar.options")
+                                            .accessibility_id("castle.sidebar.options")
                                             .icon(IconName::Ellipsis)
                                             .ghost()
                                             .compact()

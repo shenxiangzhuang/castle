@@ -56,8 +56,9 @@ jobs:
           test ! -f /etc/apt/apt-mirrors.txt || sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
           sudo apt-get install -y libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libgtk-3-dev libwebkit2gtk-4.1-dev
-      # Keep the agent's persistence contract independent of desktop feature unification.
-      - run: cargo test -p kcastle-agent --locked
+      # Keep SDK purity and harness persistence independent of desktop feature unification.
+      - run: cargo test -p agent --locked
+      - run: cargo test -p harness --locked
       - run: cargo test --workspace --locked
       - run: cargo test --locked -p ratex-font-loader -p ratex-unicode-font
 

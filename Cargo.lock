@@ -126,6 +126,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent"
+version = "0.2.0-alpha.32"
+dependencies = [
+ "async-openai",
+ "im",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1689,6 +1702,46 @@ dependencies = [
  "rustc_version",
  "syn 2.0.119",
  "unicode-xid",
+]
+
+[[package]]
+name = "desktop"
+version = "0.2.0-alpha.32"
+dependencies = [
+ "block2 0.6.2",
+ "cairo-rs",
+ "embed-resource",
+ "gdkx11",
+ "gpui-kit",
+ "gtk",
+ "harness",
+ "im",
+ "lb-wry",
+ "markdown",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-web-kit",
+ "proptest",
+ "ratex-layout",
+ "ratex-parser",
+ "ratex-svg",
+ "ratex-types",
+ "raw-window-handle",
+ "roxmltree 0.21.1",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tree-sitter",
+ "tree-sitter-haskell",
+ "unicode-linebreak",
+ "velopack",
+ "webkit2gtk",
+ "webview2-com",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -3616,6 +3669,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness"
+version = "0.2.0-alpha.32"
+dependencies = [
+ "agent",
+ "async-openai",
+ "futures-util",
+ "im",
+ "libc",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4335,65 +4407,6 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "kcastle-agent"
-version = "0.2.0-alpha.32"
-dependencies = [
- "async-openai",
- "futures-util",
- "im",
- "libc",
- "proptest",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "kcastle-desktop"
-version = "0.2.0-alpha.32"
-dependencies = [
- "block2 0.6.2",
- "cairo-rs",
- "embed-resource",
- "gdkx11",
- "gpui-kit",
- "gtk",
- "im",
- "kcastle-agent",
- "lb-wry",
- "markdown",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-core-graphics",
- "objc2-foundation 0.3.2",
- "objc2-quartz-core 0.3.2",
- "objc2-web-kit",
- "proptest",
- "ratex-layout",
- "ratex-parser",
- "ratex-svg",
- "ratex-types",
- "raw-window-handle",
- "roxmltree 0.21.1",
- "rusqlite",
- "serde",
- "serde_json",
- "time",
- "tokio",
- "tree-sitter",
- "tree-sitter-haskell",
- "unicode-linebreak",
- "velopack",
- "webkit2gtk",
- "webview2-com",
- "windows 0.61.3",
 ]
 
 [[package]]

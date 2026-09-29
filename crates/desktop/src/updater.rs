@@ -31,7 +31,7 @@ const UPDATE_TARGET: &str = "win-x64";
     ),
     all(target_os = "windows", target_arch = "x86_64")
 )))]
-compile_error!("kcastle-desktop updater does not support this target");
+compile_error!("desktop updater does not support this target");
 
 const ACTIVE_SESSION_NOTICE: &str = "Stop active sessions before restarting to update";
 
@@ -59,7 +59,7 @@ fn release_channel(version: &str) -> &str {
 
 fn update_source(version: &str) -> String {
     format!(
-        "https://updates.kcastle.mathewshen.me/{}/{}",
+        "https://updates.castle.mathewshen.me/castle/{}/{}",
         release_channel(version),
         UPDATE_TARGET
     )
@@ -176,28 +176,27 @@ mod tests {
         ] {
             assert_eq!(
                 update_source(version),
-                format!("https://updates.kcastle.mathewshen.me/{channel}/{target}")
+                format!("https://updates.castle.mathewshen.me/castle/{channel}/{target}")
             );
         }
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn universal_bridge_accepts_only_newer_native_releases() {
+    fn native_updates_accept_only_newer_releases() {
         use std::fs;
         use velopack::{
             UpdateCheck, UpdateManager, VelopackAsset, VelopackAssetFeed,
             locator::VelopackLocatorConfig, sources::FileSource,
         };
 
-        let root = std::env::temp_dir().join(format!("kcastle-update-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("castle-update-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         let manifest = root.join("sq.version");
         let updater = root.join("UpdateMac");
         fs::write(&updater, "").unwrap();
         for target in ["osx-arm64", "osx-x64"] {
             for (installed, feed, available, expected) in [
-                ("0.2.0-alpha.27", "osx-universal", "0.2.0-alpha.28", true),
                 ("0.2.0-alpha.28", target, "0.2.0-alpha.28", false),
                 ("0.2.0-alpha.28", target, "0.2.0-alpha.29", true),
                 ("0.2.0-alpha.28", target, "0.2.0-alpha.30", true),
@@ -206,18 +205,18 @@ mod tests {
                 fs::write(
                     &manifest,
                     format!(
-                        "<package><metadata><id>Kcastle</id><version>{installed}</version>\
-                         <channel>alpha</channel><mainExe>kcastle</mainExe></metadata></package>"
+                        "<package><metadata><id>Castle</id><version>{installed}</version>\
+                         <channel>alpha</channel><mainExe>castle</mainExe></metadata></package>"
                     ),
                 )
                 .unwrap();
                 let source = root.join(feed);
                 fs::create_dir_all(&source).unwrap();
                 let asset = VelopackAsset {
-                    PackageId: "Kcastle".into(),
+                    PackageId: "Castle".into(),
                     Version: available.into(),
                     Type: "Full".into(),
-                    FileName: format!("Kcastle-{available}-alpha-full.nupkg"),
+                    FileName: format!("Castle-{available}-alpha-full.nupkg"),
                     ..Default::default()
                 };
                 fs::write(
@@ -249,7 +248,7 @@ mod tests {
                         assert!(update.DeltasToTarget.is_empty());
                     }
                     UpdateCheck::NoUpdateAvailable => assert!(!expected),
-                    UpdateCheck::RemoteIsEmpty => panic!("missing migration release"),
+                    UpdateCheck::RemoteIsEmpty => panic!("missing release"),
                 }
             }
         }
@@ -263,7 +262,7 @@ mod tests {
         assert_eq!(release_channel("0.2.0"), "stable");
         assert!(
             update_source("0.2.0-alpha.7")
-                .starts_with("https://updates.kcastle.mathewshen.me/alpha/")
+                .starts_with("https://updates.castle.mathewshen.me/castle/alpha/")
         );
     }
 }

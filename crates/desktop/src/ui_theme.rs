@@ -132,9 +132,9 @@ fn code_highlight_theme(dark: bool) -> Arc<HighlightTheme> {
         HighlightTheme::default_light().as_ref().clone()
     };
     theme.name = if dark {
-        "Kcastle Markdown Dark"
+        "Castle Markdown Dark"
     } else {
-        "Kcastle Markdown Light"
+        "Castle Markdown Light"
     }
     .into();
     theme.style.editor_foreground = Some(rgb(if dark { 0xe2e4e7 } else { 0x1c2024 }).into());

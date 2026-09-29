@@ -21,7 +21,7 @@ pub const SESSION_DATABASE_FILE: &str = "sessions.sqlite3";
 pub const JSONL_STORE_FORMAT_VERSION: u32 = 4;
 // This SQLite store is new in session v2. Earlier development-only revisions never shipped, so
 // the first public on-disk schema starts at version 1.
-const DATABASE_SCHEMA_VERSION: u32 = 2;
+const DATABASE_SCHEMA_VERSION: u32 = 3;
 const CATALOG_EXTRACTOR_VERSION: i64 = 2;
 // A catalog row is safe to present only when both its serialized event representation and the
 // state-machine semantics that interpret those events match this binary. Keep the two inputs
@@ -633,6 +633,57 @@ impl SessionStore {
             .collect()
     }
 
+    /// Reserves an operation before any effect. An unfinished reservation is never retried blindly.
+    pub(crate) fn reserve_command(
+        &self,
+        session: &SessionId,
+        id: &TxId,
+        request: &[u8],
+    ) -> Result<Option<Vec<u8>>, SessionStoreError> {
+        if !self.inner.writable {
+            return Err(SessionStoreError::ReadonlyStore);
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let inserted = transaction.execute("INSERT INTO session_commands(session_id, command_id, request) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING", params![session.as_str(), id.as_str(), request])?;
+        if inserted == 1 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let (original, result): (Vec<u8>, Option<Vec<u8>>) = transaction.query_row(
+            "SELECT request, result FROM session_commands WHERE session_id=?1 AND command_id=?2",
+            params![session.as_str(), id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if original != request {
+            return Err(SessionStoreError::Corrupt(
+                "command ID was reused with different content".into(),
+            ));
+        }
+        result
+            .map(Some)
+            .ok_or_else(|| SessionStoreError::OutcomeUnknown { tx_id: id.clone() })
+    }
+
+    pub(crate) fn finish_command(
+        &self,
+        session: &SessionId,
+        id: &TxId,
+        result: &[u8],
+    ) -> Result<(), SessionStoreError> {
+        if !self.inner.writable {
+            return Err(SessionStoreError::ReadonlyStore);
+        }
+        let connection = self.connection()?;
+        let updated = connection.execute("UPDATE session_commands SET result=?3 WHERE session_id=?1 AND command_id=?2 AND result IS NULL", params![session.as_str(), id.as_str(), result])?;
+        if updated != 1 {
+            return Err(SessionStoreError::Corrupt(
+                "command reservation is missing or already complete".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn metadata(
         &self,
         session_id: &SessionId,
@@ -809,14 +860,20 @@ impl SessionStore {
         permit: &SessionWriterPermit,
     ) -> Result<(), SessionStoreError> {
         self.validate_writer(permit, session_id)?;
-        let connection = self.connection()?;
-        let changed = connection.execute(
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
             "DELETE FROM sessions WHERE id = ?1",
             params![session_id.as_str()],
         )?;
         if changed == 0 {
             return Err(SessionStoreError::SessionNotFound(session_id.clone()));
         }
+        transaction.execute(
+            "DELETE FROM session_commands WHERE session_id=?1",
+            params![session_id.as_str()],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -1091,7 +1148,7 @@ impl SessionStore {
         #[cfg(test)]
         if self.consume_failpoint(FAILPOINT_PAUSE_BEFORE_COMMIT) {
             let ready_path =
-                std::env::var_os("KCASTLE_TEST_APPEND_PAUSE_READY").ok_or_else(|| {
+                std::env::var_os("CASTLE_TEST_APPEND_PAUSE_READY").ok_or_else(|| {
                     SessionStoreError::Invalid("missing subprocess ready path".into())
                 })?;
             File::create(ready_path)?.sync_all()?;
@@ -2232,10 +2289,19 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Sess
     let found = schema_version(connection)?;
     match found {
         version if version == i64::from(DATABASE_SCHEMA_VERSION) => Ok(()),
+        2 => {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(COMMAND_SCHEMA)?;
+            transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            Ok(())
+        }
         1 => {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(FORK_SCHEMA)?;
+            transaction.execute_batch(COMMAND_SCHEMA)?;
             // V1 contains only linear histories, whose existing search projection is unchanged.
             // Advance only the precisely supported old contract; never bless unknown rows.
             transaction.execute(
@@ -2266,6 +2332,7 @@ fn initialize_or_validate_schema(connection: &mut Connection) -> Result<(), Sess
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(SCHEMA)?;
             transaction.execute_batch(FORK_SCHEMA)?;
+            transaction.execute_batch(COMMAND_SCHEMA)?;
             transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
             transaction.commit()?;
             Ok(())
@@ -2293,6 +2360,18 @@ fn unsupported_schema_version(found: i64) -> SessionStoreError {
         expected: DATABASE_SCHEMA_VERSION,
     }
 }
+
+// No foreign key: a durable command may create a draft's session row.
+// ponytail: receipts grow until session deletion; define a retry retention contract before compaction.
+const COMMAND_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS session_commands (
+    session_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    request BLOB NOT NULL,
+    result BLOB,
+    PRIMARY KEY(session_id, command_id)
+) STRICT;
+"#;
 
 const FORK_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS session_fork_origins (
@@ -2549,6 +2628,52 @@ mod tests {
             1
         );
         drop(migrated);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn schema_two_migrates_without_rewriting_journal_and_deletion_removes_command_results() {
+        let directory = test_directory("command-schema-upgrade");
+        let store = SessionStore::open_project(&directory).unwrap();
+        let session = create_session(&store, "legacy");
+        let permit = store.acquire_writer(&session.id).unwrap();
+        let receipt = store
+            .append(
+                &append_request(&session.id, "legacy-tx", 0, two_events()),
+                &permit,
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TABLE session_commands; PRAGMA user_version=2;")
+            .unwrap();
+        drop(permit);
+        drop(store);
+        let catalog = crate::Session::catalog_in_project(&directory, "project").unwrap();
+        assert_eq!(catalog.sessions.len(), 1);
+        let store = SessionStore::open_project(&directory).unwrap();
+        assert_eq!(store.load(&session.id).unwrap().transactions, vec![receipt]);
+        let id = TxId::random();
+        assert!(
+            store
+                .reserve_command(&session.id, &id, b"command")
+                .unwrap()
+                .is_none()
+        );
+        store.finish_command(&session.id, &id, b"result").unwrap();
+        let permit = store.acquire_writer(&session.id).unwrap();
+        store.delete(&session.id, &permit).unwrap();
+        let count: i64 = store
+            .connection()
+            .unwrap()
+            .query_row("SELECT count(*) FROM session_commands", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(permit);
+        drop(store);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2874,10 +2999,10 @@ mod tests {
     #[test]
     #[ignore = "subprocess helper; invoked by hard_kill_rolls_back_and_releases_writer"]
     fn append_pause_subprocess() {
-        let Some(database_path) = std::env::var_os("KCASTLE_TEST_DATABASE_PATH") else {
+        let Some(database_path) = std::env::var_os("CASTLE_TEST_DATABASE_PATH") else {
             return;
         };
-        let Some(session_id) = std::env::var_os("KCASTLE_TEST_SESSION_ID") else {
+        let Some(session_id) = std::env::var_os("CASTLE_TEST_SESSION_ID") else {
             return;
         };
         let store = SessionStore::open_database(database_path).unwrap();
@@ -2904,9 +3029,9 @@ mod tests {
                 "session::store::tests::append_pause_subprocess",
                 "--nocapture",
             ])
-            .env("KCASTLE_TEST_DATABASE_PATH", &database_path)
-            .env("KCASTLE_TEST_SESSION_ID", session.id.as_str())
-            .env("KCASTLE_TEST_APPEND_PAUSE_READY", &ready_path)
+            .env("CASTLE_TEST_DATABASE_PATH", &database_path)
+            .env("CASTLE_TEST_SESSION_ID", session.id.as_str())
+            .env("CASTLE_TEST_APPEND_PAUSE_READY", &ready_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -4185,7 +4310,7 @@ mod tests {
 
     fn test_directory(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "kcastle-session-store-{label}-{}-{}",
+            "castle-session-store-{label}-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
         ))

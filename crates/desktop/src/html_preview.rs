@@ -754,7 +754,7 @@ fn document(source: &str, dark: bool, generation: u64, token: &str) -> String {
 /// Load a local Markdown fixture in the complete debug app, with no provider or journal writes.
 #[cfg(debug_assertions)]
 pub(crate) fn native_fixture(mut app: DesktopApp) -> DesktopApp {
-    let Some(path) = std::env::var_os("KCASTLE_PREVIEW_MARKDOWN") else {
+    let Some(path) = std::env::var_os("CASTLE_PREVIEW_MARKDOWN") else {
         return app;
     };
     let text = match std::fs::read_to_string(path) {
@@ -809,7 +809,7 @@ fn create_browser(
     let clip = macos::ClipView::new(window)?;
     // Native WebKit/GTK bridges can also be exposed inside subframes. Only the
     // opaque sandbox's trusted parent knows this per-browser capability token.
-    let token = kcastle_agent::SessionId::new().to_string();
+    let token = harness::SessionId::new().to_string();
     let expected_token = token.clone();
     let builder = wry::WebViewBuilder::new()
         .with_html(document(source, dark, generation, &token))
@@ -1387,8 +1387,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn multiple_previews_survive_virtualization_and_reject_old_callbacks(cx: &mut TestAppContext) {
-        let root =
-            std::env::temp_dir().join(format!("kcastle-html-{}", kcastle_agent::SessionId::new()));
+        let root = std::env::temp_dir().join(format!("castle-html-{}", harness::SessionId::new()));
         let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -1851,10 +1850,8 @@ mod tests {
         gpui_kit::Entity<DesktopApp>,
         &mut gpui_kit::VisualTestContext,
     ) {
-        let root = std::env::temp_dir().join(format!(
-            "kcastle-preview-{}",
-            kcastle_agent::SessionId::new()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("castle-preview-{}", harness::SessionId::new()));
         let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {

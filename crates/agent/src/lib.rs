@@ -8,35 +8,22 @@
     )
 )]
 
-mod agent;
-mod agent_loop;
-mod context;
+pub mod context;
 mod model;
-mod session;
-mod tools;
+pub mod session;
 
 pub use async_openai::types::responses::{EasyInputMessage, InputItem};
-
-pub use agent::Agent;
-pub use agent_loop::{ActiveAgent, AgentError, AgentEvent, RunControl, RunFailure, RunSummary};
 pub use context::compaction::CompactionConfig;
-pub use model::{Model, ReasoningEffort};
-pub use session::event::{
-    AssistantChunk, CallId, CompactionId, EventTime, InputId, InputOrigin, RecordedEvent,
-    RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome, SESSION_FORMAT_VERSION,
-    SessionEvent, StepId, StepOutcome, TokenUsage, ToolAuthorizationDecision, ToolExecutionOutcome,
-    ToolResultStatus, TurnEndReason, TurnId, TxId,
-};
-pub use session::machine::{PendingInput, SessionMachineError};
-pub use session::store::{
-    CommitReceipt, SESSION_DATABASE_FILE, SessionErrorClass, SessionStoreError,
-};
-pub use session::{
-    DEFAULT_PROJECT_ID, Session, SessionCatalog, SessionConfig, SessionError, SessionId,
-    SessionInfo, SessionModelConfig, SessionSnapshot, validate_events,
-};
-pub use tools::{AgentTool, Env, ShellTool, ToolResult};
-
+pub use model::ReasoningEffort;
+pub use session::event::*;
+pub use session::machine::{PendingInput, PlannedBatch, SessionMachine, SessionMachineError};
 pub use session::tree::{
     ConversationNode, ConversationNodeId, ConversationNodeKind, ConversationTree, ForkOrigin,
 };
+pub use session::{SessionConfig, SessionId, SessionModelConfig};
+
+mod run;
+pub use run::{AgentEffect, AgentInput, Transition};
+pub fn validate_events(events: &[RecordedEvent]) -> Result<(), SessionMachineError> {
+    SessionMachine::from_events(events).map(|_| ())
+}

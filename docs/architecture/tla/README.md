@@ -4,8 +4,13 @@ Executable models check selected architecture contracts alongside implementation
 Each model documents its bounds, assumptions, properties, and implementation mapping;
 a passing model check does not prove that the Rust implementation refines the model.
 
+The [core architecture](../overview.md) separates SDK decisions, harness execution and interaction.
+Existing tool, queue and branch invariants remain unchanged. The harness connection model adds
+command reservations, atomic snapshot/subscription, explicit lag and shutdown settlement.
+
 | Model | Architecture contract | Scope |
 | --- | --- | --- |
+| [Harness connection](harness-connection/README.md) | [Core architecture](../overview.md) | Durable command deduplication, observer gaps, disconnection and join |
 | [Chat presentation](chat-presentation/README.md) | [Desktop](../desktop.md#chat-viewport) | Viewport demand, freshness, cancellation, and bounded workers |
 | [Inline HTML](html-preview/README.md) | [Desktop](../desktop.md#inline-html-previews) | Multiple live documents, visibility, retention and stale callback rejection |
 | [HTML scrolling](html-scroll/README.md) | [Desktop](../desktop.md#inline-html-previews) | Exclusive wheel ownership, short content, boundary handoff and eventual delivery |
@@ -13,10 +18,10 @@ a passing model check does not prove that the Rust implementation refines the mo
 | [Input queue](input-queue/README.md) | [Session](../session.md#pending-input-control) | Durable pending messages, promotion, cancellation, attachment and stop/resume |
 | [Session tools](session-tools/README.md) | [Session](../session.md) | Authorization, dispatch intent, commit receipts, ordered attachment, and cancellation/crash recovery |
 
-The [desktop update migration](../desktop.md#desktop-updates) changes release-feed routing,
-not the session or Chat state machines modeled here. Retention of the Universal bridge feed,
-package availability, and Velopack app replacement are outside these models; release/updater
-checks and the documented native migration procedure cover those boundaries.
+Product identity, update hosting and the [data-root migration](../app-storage.md) do not alter
+modeled session or Chat transitions. Filesystem rename atomicity, the legacy application being
+closed during migration, and Velopack replacement are outside these models. Storage migration
+and release/updater tests check those implementation boundaries.
 
 ## Layout
 

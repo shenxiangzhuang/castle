@@ -1,7 +1,7 @@
 # 对话树、消息编辑与 Fork
 
 Status: accepted. 会话事件日志保持 append-only；树、当前 head 和关系索引均由日志投影。
-相关职责见 [Session](session.md)、[Desktop](desktop.md)，安全模型见
+层次与 Public API 遵循 [核心架构](overview.md)；相关职责见 [Session](session.md)、[Desktop](desktop.md)，安全模型见
 [Conversation tree TLA+](tla/conversation-tree/README.md)。
 
 ## 用户行为
@@ -25,8 +25,8 @@ Status: accepted. 会话事件日志保持 append-only；树、当前 head 和�
 分支操作须在 writer 下重新加载并验证 `expected_revision` 与 `expected_head`。
 只有无活动运行、未决工具、恢复任务和 pending 输入的可写 session 可以修改 head 或 Fork。
 编辑在一个事务中提交 head 选择、新输入及 run/turn/step 建立与附加；提交结果不明时
-用同一操作 ID 核实，不能另建分支盲目重试。界面收到提交回执后重建路径，随后正常发起
-模型请求。低层显式选头只提交选择事件，不发送消息。崩溃恢复不能重执行历史工具。
+用同一操作 ID 核实，不能另建分支盲目重试。运行 owner 确认提交后发布事件并发起模型请求，
+界面消费已提交事件重建路径。低层显式选头只提交选择事件，不发送消息。崩溃恢复不能重执行历史工具。
 
 ## Fork 存储
 
@@ -51,7 +51,7 @@ Fork 与源 session 共用项目和工作目录，但拥有独立日志。子 se
 所有分支的请求，排除 Fork 导入的使用量；路径上的历史详情仍可显示导入用量。
 关系列表由 catalog 查询，归档会话保留直接关系但不出现在普通侧栏。
 
-SQLite schema 2 增加来源索引；仅迁移兼容的 schema 1 catalog，不改写原日志。
+SQLite schema 2 增加来源索引，schema 3 增加命令账本；支持从 schema 1/2 升级，不改写原日志。
 事件/JSONL 格式为 4、搜索提取器为 2、机器语义为 2。旧客户端不得忽略新事件后
 将多分支混成一个模型上下文。JSONL 导出保留全日志，可独立重建子 session。
 

@@ -1,4 +1,4 @@
-test_package = ["kcastle-desktop"]
+test_package = ["desktop"]
 examine_globs = [
   "crates/desktop/src/domain/**/*.rs",
   "crates/desktop/src/layout/**/*.rs",

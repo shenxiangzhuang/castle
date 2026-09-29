@@ -1,5 +1,5 @@
 //! Cold-process RaTeX heap measurement (excludes native/GPU allocations).
-//! cargo run -p kcastle-desktop --example math_memory -- '\text{中文}'
+//! cargo run -p desktop --example math_memory -- '\text{中文}'
 //! An optional second argument writes the SVG for before/after comparison.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};

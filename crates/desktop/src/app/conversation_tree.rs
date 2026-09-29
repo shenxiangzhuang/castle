@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::MessageId;
 use crate::domain::session_document::ConversationItemId;
-use kcastle_agent::{ConversationNode, ConversationNodeKind, InputId};
+use harness::{ConversationNode, ConversationNodeKind, InputId};
 
 #[derive(Clone)]
 pub(crate) struct EditDraft {

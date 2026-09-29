@@ -48,7 +48,7 @@
     }
     if (event.source === parent && event.data?.kind === 'theme') {
       document.documentElement.style.colorScheme = event.data.dark ? 'dark' : 'light';
-      dispatchEvent(new CustomEvent('kcastle-theme', {detail:{dark:event.data.dark}}));
+      dispatchEvent(new CustomEvent('castle-theme', {detail:{dark:event.data.dark}}));
       schedule();
     }
   });

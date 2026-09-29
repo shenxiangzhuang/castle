@@ -1,6 +1,6 @@
-# Kcastle desktop
+# Castle desktop
 
-`kcastle-desktop` is the native GPUI interface for `kcastle-agent`. It provides project-scoped
+`desktop` is the native GPUI interface for `harness`. It provides project-scoped
 session history, streaming chat, approvals, trajectory inspection, responsive layout, and native
 macOS window behavior.
 
@@ -13,27 +13,31 @@ just macos-run
 ```
 
 Use `just macos-run-debug` for a debug build. These recipes create and sign
-`target/Kcastle.app` before launching it. A bare `cargo run -p kcastle-desktop` starts an
+`target/Castle.app` before launching it. A bare `cargo run -p desktop` starts an
 unbundled executable and does not reproduce all AppKit behavior, especially fullscreen titlebar
 reveal. Configure at least one provider in **Settings → Models** before starting a session.
 
 Desktop preferences, provider catalogs, credentials, and the project registry are stored in the
-app-level SQLite WAL database `~/.kcastle/app.sqlite3`. The Models tab follows the DSH provider-card
+app-level SQLite WAL database `~/.castle/app.sqlite3`. The Models tab follows the DSH provider-card
 flow: configured providers stay editable, while Add provider lets you choose OpenAI or DeepSeek
 before entering its API key and editing its model catalog. The composer only lists models from
 providers with configured credentials. API keys are never rendered back into the form, and the app
 database and its WAL sidecars use user-only permissions on Unix. Global model and permission choices
 are defaults for new sessions.
 
+Quit Kcastle before the first Castle launch. If `~/.castle` does not exist, the old `~/.kcastle`
+directory moves there automatically; existing directories are never merged or overwritten.
+See the [storage contract](../../docs/architecture/app-storage.md#layout).
+
 Each project persists session metadata and append-only transactions in its own SQLite WAL database
-at `~/.kcastle/projects/<project-id>/sessions/sessions.sqlite3`. The built-in Default project follows
-the same layout at `~/.kcastle/projects/default/sessions/sessions.sqlite3`; there is no separate
+at `~/.castle/projects/<project-id>/sessions/sessions.sqlite3`. The built-in Default project follows
+the same layout at `~/.castle/projects/default/sessions/sessions.sqlite3`; there is no separate
 top-level Default session store. JSONL is export-only.
 
-Development and isolated acceptance runs can set `KCASTLE_DATA_DIR` to put the app database and
+Development and isolated acceptance runs can set `CASTLE_DATA_DIR` to put the app database and
 every project session store under a separate data root. An absolute path is
 recommended; a relative path is resolved from the process working directory. The variable must not
-be empty. Normal launches leave it unset and continue to use `~/.kcastle`.
+be empty. Normal launches leave it unset and continue to use `~/.castle`.
 
 In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
@@ -55,17 +59,17 @@ positions in automation:
 
 | Flow | Identifier |
 | --- | --- |
-| New session | `kcastle.session.new` |
-| Session search input | `kcastle.session.search.input` |
-| Chat / Trajectory tabs | `kcastle.conversation.chat`, `kcastle.conversation.trajectory` |
-| Composer input group | `kcastle.composer.input` |
-| Permission / model controls | `kcastle.composer.permission`, `kcastle.composer.model` |
-| Send / stop | `kcastle.composer.send`, `kcastle.composer.stop` |
-| Tool approval | `kcastle.approval.allow`, `kcastle.approval.deny` |
-| Trajectory search input | `kcastle.trajectory.search.input` |
-| Settings / active dialog | `kcastle.settings.open`, `kcastle.dialog` |
+| New session | `castle.session.new` |
+| Session search input | `castle.session.search.input` |
+| Chat / Trajectory tabs | `castle.conversation.chat`, `castle.conversation.trajectory` |
+| Composer input group | `castle.composer.input` |
+| Permission / model controls | `castle.composer.permission`, `castle.composer.model` |
+| Send / stop | `castle.composer.send`, `castle.composer.stop` |
+| Tool approval | `castle.approval.allow`, `castle.approval.deny` |
+| Trajectory search input | `castle.trajectory.search.input` |
+| Settings / active dialog | `castle.settings.open`, `castle.dialog` |
 
-The multiline text input is the `MultilineTextInput` descendant of `kcastle.composer.input` and is
+The multiline text input is the `MultilineTextInput` descendant of `castle.composer.input` and is
 labelled `Message the agent`. Workspace and session identifiers are derived from their durable
 project and session IDs instead of list positions. Treat identifiers in `ui_automation.rs` as a
 compatibility contract: layout and visible copy may change without renaming them.
@@ -93,7 +97,7 @@ incrementally, while geometry is cached by session, event revision, and mode and
 reprojected for the current viewport; Duration coordinates use a merged busy-time index rather
 than rescanning every interval for every item.
 
-DMG, AppImage, and Setup EXE builds check `updates.kcastle.mathewshen.me` hourly and download a
+DMG, AppImage, and Setup EXE builds check `updates.castle.mathewshen.me` hourly and download a
 newer release in the background. After the complete package passes its checksum, a compact update
 button appears beside Settings. Restart is blocked while any session is active; otherwise the
 updater waits for the old process to exit, installs the downloaded package, and launches the new
@@ -101,37 +105,15 @@ version. DEB, source, and unbundled development builds do not auto-update.
 
 ## Architecture
 
-The desktop crate keeps view transitions, calculations, and session runtimes separate:
+The [core architecture](../../docs/architecture/overview.md) defines the dependency
+`Desktop / CLI -> Harness -> SDK`. Desktop sends commands and projects snapshots/events;
+`SessionRuntime` owns UI projections and pending acknowledgments, while the harness owns execution.
+Projects group sessions, not scheduling: sessions run independently of the selected UI view.
 
-```text
-App -> ProjectStore -> Project -> SessionRuntime -> Agent
-                              \-> SessionRuntime -> Agent
-```
-
-Key constraints:
-
-- `domain`, `layout`, and `application` are pure layers and do not depend on GPUI.
-- Views send actions instead of mutating domain state directly.
-- `SessionId` is the stable identity and each `SessionRuntime` owns exactly one Agent, control
-  channel, committed-event stream, approval state, configuration, and canonical
-  `SessionDocument`. Agent events do not pass through an app-global bus or the currently selected
-  session.
-- Projects are directory namespaces, not scheduling boundaries. Sessions in the same or different
-  projects run concurrently and switching the selected runtime only changes the visible snapshot.
-- Durable chat, trajectory, timing, details, search, and composer data are selectors over the same
-  committed document revision. Transient controls never create durable chat rows.
-- SQLite expected-revision compare-and-swap serializes writers. Every model/tool intent commits
-  before the external effect and the UI sees only the resulting commit receipt.
-- A collapsed live Think row shows the latest non-blank reasoning line and follows its horizontal
-  tail at most once every three display frames; expanding it exposes the complete reasoning, and
-  settlement restores the stable first line immediately.
-- Chat position is restored with semantic message anchors rather than raw pixel snapshots.
-- Session metadata and committed update times are cached outside the render path and refreshed
-  after project or session mutations; opaque session locators are never treated as data files.
-- GPUI lifecycle calls stay in `platform/gpui`; AppKit titlebar integration stays in
-  `platform/native_titlebar.rs`.
-
-`architecture_tests.rs` enforces the pure-layer, draw-phase, and render-time filesystem boundaries.
+[Desktop architecture](../../docs/architecture/desktop.md) owns projection, interaction and
+rendering contracts; [Session](../../docs/architecture/session.md) owns durable semantics.
+`architecture_tests.rs` currently enforces GPUI-free `domain`/`layout`/`application`, draw-phase,
+and render-time filesystem boundaries; it does not yet enforce the target crate split.
 
 ## Verification
 

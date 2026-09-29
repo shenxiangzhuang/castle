@@ -57,7 +57,7 @@ Run regression tests with:
 
 ```sh
 cargo test --locked -p ratex-font-loader -p ratex-unicode-font
-cargo run --locked -p kcastle-desktop --example math_memory -- '\text{中文}'
+cargo run --locked -p desktop --example math_memory -- '\text{中文}'
 ```
 
 The example reports Rust heap allocations, not total process footprint. Run each

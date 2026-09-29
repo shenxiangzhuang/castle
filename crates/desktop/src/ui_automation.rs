@@ -6,42 +6,42 @@ use std::path::Path;
 /// These identifiers are an automation contract. Keep them independent of visible copy and GPUI
 /// element IDs so tests remain stable when labels or layout change.
 pub(crate) mod ids {
-    pub(crate) const APP_MAIN: &str = "kcastle.main";
-    pub(crate) const SIDEBAR: &str = "kcastle.sidebar";
-    pub(crate) const SIDEBAR_TOGGLE: &str = "kcastle.sidebar.toggle";
-    pub(crate) const NEW_SESSION: &str = "kcastle.session.new";
-    pub(crate) const SESSION_SEARCH_TOGGLE: &str = "kcastle.session.search.toggle";
-    pub(crate) const SESSION_SEARCH_INPUT: &str = "kcastle.session.search.input";
-    pub(crate) const WORKSPACE_LIST: &str = "kcastle.workspace.list";
-    pub(crate) const WORKSPACE_ADD: &str = "kcastle.workspace.add";
-    pub(crate) const SETTINGS_OPEN: &str = "kcastle.settings.open";
+    pub(crate) const APP_MAIN: &str = "castle.main";
+    pub(crate) const SIDEBAR: &str = "castle.sidebar";
+    pub(crate) const SIDEBAR_TOGGLE: &str = "castle.sidebar.toggle";
+    pub(crate) const NEW_SESSION: &str = "castle.session.new";
+    pub(crate) const SESSION_SEARCH_TOGGLE: &str = "castle.session.search.toggle";
+    pub(crate) const SESSION_SEARCH_INPUT: &str = "castle.session.search.input";
+    pub(crate) const WORKSPACE_LIST: &str = "castle.workspace.list";
+    pub(crate) const WORKSPACE_ADD: &str = "castle.workspace.add";
+    pub(crate) const SETTINGS_OPEN: &str = "castle.settings.open";
 
-    pub(crate) const CONVERSATION_TABS: &str = "kcastle.conversation.tabs";
-    pub(crate) const CHAT_TAB: &str = "kcastle.conversation.chat";
-    pub(crate) const TRAJECTORY_TAB: &str = "kcastle.conversation.trajectory";
-    pub(crate) const CHAT_PANEL: &str = "kcastle.chat";
-    pub(crate) const TRANSCRIPT: &str = "kcastle.chat.transcript";
-    pub(crate) const BACK_TO_BOTTOM: &str = "kcastle.chat.back-to-bottom";
+    pub(crate) const CONVERSATION_TABS: &str = "castle.conversation.tabs";
+    pub(crate) const CHAT_TAB: &str = "castle.conversation.chat";
+    pub(crate) const TRAJECTORY_TAB: &str = "castle.conversation.trajectory";
+    pub(crate) const CHAT_PANEL: &str = "castle.chat";
+    pub(crate) const TRANSCRIPT: &str = "castle.chat.transcript";
+    pub(crate) const BACK_TO_BOTTOM: &str = "castle.chat.back-to-bottom";
 
-    pub(crate) const COMPOSER: &str = "kcastle.composer";
-    pub(crate) const COMPOSER_INPUT: &str = "kcastle.composer.input";
-    pub(crate) const COMPOSER_COMMANDS: &str = "kcastle.composer.commands";
-    pub(crate) const COMPOSER_PERMISSION: &str = "kcastle.composer.permission";
-    pub(crate) const COMPOSER_MODEL: &str = "kcastle.composer.model";
-    pub(crate) const COMPOSER_SEND: &str = "kcastle.composer.send";
-    pub(crate) const COMPOSER_STOP: &str = "kcastle.composer.stop";
-    pub(crate) const COMPOSER_MENU: &str = "kcastle.composer.menu";
+    pub(crate) const COMPOSER: &str = "castle.composer";
+    pub(crate) const COMPOSER_INPUT: &str = "castle.composer.input";
+    pub(crate) const COMPOSER_COMMANDS: &str = "castle.composer.commands";
+    pub(crate) const COMPOSER_PERMISSION: &str = "castle.composer.permission";
+    pub(crate) const COMPOSER_MODEL: &str = "castle.composer.model";
+    pub(crate) const COMPOSER_SEND: &str = "castle.composer.send";
+    pub(crate) const COMPOSER_STOP: &str = "castle.composer.stop";
+    pub(crate) const COMPOSER_MENU: &str = "castle.composer.menu";
 
-    pub(crate) const APPROVAL: &str = "kcastle.approval";
-    pub(crate) const APPROVAL_DENY: &str = "kcastle.approval.deny";
-    pub(crate) const APPROVAL_ALLOW: &str = "kcastle.approval.allow";
+    pub(crate) const APPROVAL: &str = "castle.approval";
+    pub(crate) const APPROVAL_DENY: &str = "castle.approval.deny";
+    pub(crate) const APPROVAL_ALLOW: &str = "castle.approval.allow";
 
-    pub(crate) const TRAJECTORY_PANEL: &str = "kcastle.trajectory";
-    pub(crate) const TRAJECTORY_SEARCH_INPUT: &str = "kcastle.trajectory.search.input";
+    pub(crate) const TRAJECTORY_PANEL: &str = "castle.trajectory";
+    pub(crate) const TRAJECTORY_SEARCH_INPUT: &str = "castle.trajectory.search.input";
 
-    pub(crate) const DIALOG: &str = "kcastle.dialog";
-    pub(crate) const DIALOG_PRIMARY_INPUT: &str = "kcastle.dialog.input";
-    pub(crate) const DIALOG_CLOSE: &str = "kcastle.dialog.close";
+    pub(crate) const DIALOG: &str = "castle.dialog";
+    pub(crate) const DIALOG_PRIMARY_INPUT: &str = "castle.dialog.input";
+    pub(crate) const DIALOG_CLOSE: &str = "castle.dialog.close";
 
     #[cfg(test)]
     pub(crate) const CORE: &[&str] = &[
@@ -97,7 +97,7 @@ pub(crate) fn session(project_id: &str, path: &Path) -> String {
 }
 
 fn dynamic_id(kind: &str, value: &str) -> String {
-    format!("kcastle.{kind}.{}", segment(value))
+    format!("castle.{kind}.{}", segment(value))
 }
 
 #[allow(clippy::expect_used, reason = "fmt::Write for String is infallible")]
@@ -124,20 +124,20 @@ mod tests {
     fn core_automation_ids_are_unique_and_namespaced() {
         let unique = ids::CORE.iter().copied().collect::<HashSet<_>>();
         assert_eq!(unique.len(), ids::CORE.len());
-        assert!(ids::CORE.iter().all(|id| id.starts_with("kcastle.")));
+        assert!(ids::CORE.iter().all(|id| id.starts_with("castle.")));
     }
 
     #[test]
     fn dynamic_ids_are_stable_and_safe_for_platform_clients() {
-        assert_eq!(workspace("repo/a"), "kcastle.workspace.repo_2Fa");
+        assert_eq!(workspace("repo/a"), "castle.workspace.repo_2Fa");
         assert_ne!(workspace("repo/a"), workspace("repo_a"));
         assert_eq!(
             workspace_action("new-session", "repo/a"),
-            "kcastle.workspace.new-session.repo_2Fa"
+            "castle.workspace.new-session.repo_2Fa"
         );
         assert_eq!(
             session("repo/a", Path::new("/sessions/session-42")),
-            "kcastle.session.repo_2Fa.session-42"
+            "castle.session.repo_2Fa.session-42"
         );
     }
 }

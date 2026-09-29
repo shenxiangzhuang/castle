@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use kcastle_agent::{
+use harness::{
     AssistantChunk, CallId, CompactionId, EventTime, InputId, InputOrigin, RecordedEvent,
     RequestHeaderReason, RequestId, RunId, SessionConfig, SessionEvent, StepId, StepOutcome,
     TokenUsage, ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus, TurnId,
@@ -10,7 +10,7 @@ use kcastle_agent::{
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SessionDocument {
-    pub(crate) tree: kcastle_agent::ConversationTree,
+    pub(crate) tree: harness::ConversationTree,
     inherited_stats: SessionStats,
     inherited_items: HashSet<ConversationItemId>,
     cursor: EventCursor,
@@ -776,14 +776,14 @@ impl SessionDocument {
         Ok(delta)
     }
 
-    pub(crate) fn pending_inputs(&self) -> Vec<kcastle_agent::PendingInput> {
+    pub(crate) fn pending_inputs(&self) -> Vec<harness::PendingInput> {
         self.pending_inputs
             .iter()
             .filter_map(|id| {
                 self.graph
                     .inputs
                     .get(id)
-                    .map(|input| kcastle_agent::PendingInput {
+                    .map(|input| harness::PendingInput {
                         input_id: id.clone(),
                         input: input.text.clone(),
                         origin: input.origin,
@@ -2332,7 +2332,7 @@ fn prompt_change_kind(
     }
 }
 
-fn input_items_text(items: &[kcastle_agent::InputItem]) -> String {
+fn input_items_text(items: &[harness::InputItem]) -> String {
     let mut parts = Vec::new();
     for item in items {
         if let Ok(value) = serde_json::to_value(item) {
@@ -2347,7 +2347,7 @@ fn input_items_text(items: &[kcastle_agent::InputItem]) -> String {
 /// delta can never become the durable UI truth.
 fn reconcile_completed_segments(
     response: &mut ResponseNode,
-    items: &[kcastle_agent::InputItem],
+    items: &[harness::InputItem],
     source_seq: u64,
 ) {
     let mut canonical_segments: Vec<(ResponseChannel, String)> = Vec::new();
@@ -2415,7 +2415,7 @@ fn reconcile_completed_segments(
     response.active_segment = None;
 }
 
-fn tool_calls_from_items(items: &[kcastle_agent::InputItem]) -> HashMap<CallId, ToolCallMetadata> {
+fn tool_calls_from_items(items: &[harness::InputItem]) -> HashMap<CallId, ToolCallMetadata> {
     let mut calls = HashMap::new();
     for item in items {
         let Ok(value) = serde_json::to_value(item) else {
@@ -2455,7 +2455,7 @@ fn tool_calls_from_items(items: &[kcastle_agent::InputItem]) -> HashMap<CallId, 
     calls
 }
 
-fn tool_call_order_from_items(items: &[kcastle_agent::InputItem]) -> Vec<CallId> {
+fn tool_call_order_from_items(items: &[harness::InputItem]) -> Vec<CallId> {
     items
         .iter()
         .filter_map(|item| serde_json::to_value(item).ok())
@@ -2505,7 +2505,7 @@ fn format_tool_payload(calls: &HashMap<CallId, ToolCallMetadata>, order: &[CallI
         .join("\n")
 }
 
-fn tool_result_preview(item: &kcastle_agent::InputItem) -> String {
+fn tool_result_preview(item: &harness::InputItem) -> String {
     let Ok(value) = serde_json::to_value(item) else {
         return String::new();
     };
@@ -2627,7 +2627,7 @@ fn nonempty(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use kcastle_agent::{
+    use harness::{
         EasyInputMessage, InputItem, ResponseInfo, RunId, RunOutcome, SessionConfig,
         ToolExecutionOutcome, TurnEndReason, TxId,
     };
@@ -2670,8 +2670,8 @@ pub(crate) mod tests {
         let child = SessionDocument::from_events(vec![recorded(
             0,
             SessionEvent::SessionForked {
-                origin: kcastle_agent::ForkOrigin {
-                    session_id: kcastle_agent::SessionId::new(),
+                origin: harness::ForkOrigin {
+                    session_id: harness::SessionId::new(),
                     revision: 1,
                     anchor: user,
                     head,
@@ -2718,8 +2718,8 @@ pub(crate) mod tests {
                 vec![recorded(
                     0,
                     SessionEvent::SessionForked {
-                        origin: kcastle_agent::ForkOrigin {
-                            session_id: kcastle_agent::SessionId::new(),
+                        origin: harness::ForkOrigin {
+                            session_id: harness::SessionId::new(),
                             revision: 1,
                             anchor: head.unwrap(),
                             head,
@@ -2762,7 +2762,7 @@ pub(crate) mod tests {
             ] {
                 events.push(recorded(events.len() as u64, event));
             }
-            kcastle_agent::validate_events(&events).unwrap();
+            harness::validate_events(&events).unwrap();
             let document = SessionDocument::from_events(events.clone()).unwrap();
             let mut selected = document.selected_path(document.tree.head()).unwrap();
             assert_eq!(selected.pending_inputs(), document.pending_inputs());
@@ -2800,7 +2800,7 @@ pub(crate) mod tests {
             })
             .collect::<Vec<_>>();
             events.extend(delta.clone());
-            kcastle_agent::validate_events(&events).unwrap();
+            harness::validate_events(&events).unwrap();
             selected.apply_batch(delta).unwrap();
             assert!(selected.pending_inputs().is_empty());
             assert_eq!(
@@ -3159,8 +3159,7 @@ pub(crate) mod tests {
     #[test]
     fn golden_projection_preserves_dsh_semantics() {
         let events = fixture();
-        kcastle_agent::validate_events(&events)
-            .expect("golden input must itself be a committed v2 log");
+        harness::validate_events(&events).expect("golden input must itself be a committed v2 log");
         let document = SessionDocument::from_events(events).unwrap();
         let trajectory = document
             .trajectory()

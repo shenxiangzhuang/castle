@@ -150,10 +150,16 @@ pub enum AgentEvent {
     RunFinished(RunSummary),
     RunAborted,
     RunFailed(RunFailure),
+    ConfigChanged(crate::SessionConfig),
+}
+
+pub(super) enum InputAction {
+    Event(Box<crate::SessionEvent>),
+    Permission(bool),
 }
 
 pub(super) struct InputCommand {
-    pub(super) event: crate::SessionEvent,
+    pub(super) action: InputAction,
     pub(super) acknowledgement: oneshot::Sender<Result<(), String>>,
 }
 
@@ -177,10 +183,12 @@ pub struct RunControl {
 }
 
 impl RunControl {
+    #[cfg(test)]
     pub async fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
         self.submit(message.into(), InputOrigin::Steer).await
     }
 
+    #[cfg(test)]
     pub async fn queue(&self, message: impl Into<String>) -> Result<(), AgentError> {
         self.submit(message.into(), InputOrigin::Queue).await
     }
@@ -195,6 +203,7 @@ impl RunControl {
             .await
     }
 
+    #[cfg(test)]
     async fn submit(&self, input: String, origin: InputOrigin) -> Result<(), AgentError> {
         if input.trim().is_empty() {
             return Err(AgentError::EmptyInput);
@@ -208,13 +217,35 @@ impl RunControl {
     }
 
     async fn send_input_event(&self, event: crate::SessionEvent) -> Result<(), AgentError> {
+        self.send_action(InputAction::Event(Box::new(event))).await
+    }
+
+    pub(crate) async fn submit_input(
+        &self,
+        id: InputId,
+        input: String,
+        origin: InputOrigin,
+    ) -> Result<(), AgentError> {
+        self.send_input_event(crate::SessionEvent::InputSubmitted {
+            input_id: id,
+            input,
+            origin,
+        })
+        .await
+    }
+
+    pub(crate) async fn set_permission(&self, allow: bool) -> Result<(), AgentError> {
+        self.send_action(InputAction::Permission(allow)).await
+    }
+
+    async fn send_action(&self, action: InputAction) -> Result<(), AgentError> {
         if self.cancel.is_cancelled() {
             return Err(AgentError::Aborted);
         }
         let (acknowledgement, accepted) = oneshot::channel();
         self.commands
             .send(InputCommand {
-                event,
+                action,
                 acknowledgement,
             })
             .map_err(|error| AgentError::Task(error.to_string()))?;
@@ -265,6 +296,10 @@ pub struct ActiveAgent {
 impl ActiveAgent {
     pub fn control(&self) -> RunControl {
         self.control.clone()
+    }
+
+    pub(crate) fn try_next_event(&mut self) -> Option<AgentEvent> {
+        self.events.try_recv().ok()
     }
 
     pub async fn next_event(&mut self) -> Option<AgentEvent> {

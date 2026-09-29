@@ -1,6 +1,6 @@
 [package]
-name = "kcastle-desktop"
-description = "Native GPUI desktop interface for kcastle-agent"
+name = "desktop"
+description = "Native GPUI desktop interface for harness"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,20 +12,19 @@ publish = false
 fuzzing = []
 
 [[bin]]
-name = "kcastle-desktop"
+name = "castle-desktop"
 path = "src/main.rs"
 
 [dependencies]
 gpui-kit.workspace = true
 im.workspace = true
-kcastle-agent.workspace = true
+harness.workspace = true
 markdown.workspace = true
 ratex-layout.workspace = true
 ratex-parser.workspace = true
 ratex-svg.workspace = true
 ratex-types.workspace = true
 roxmltree = "=0.21.1"
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true

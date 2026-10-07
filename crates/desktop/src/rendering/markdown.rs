@@ -618,7 +618,12 @@ fn render_code_block(
                     .text_size(px(12.0))
                     .line_height(px(20.0))
                     .child(language_label)
-                    .child(Clipboard::new(clipboard_id).value(code.to_owned())),
+                    .child(
+                        Clipboard::new(clipboard_id)
+                            .value(code.to_owned())
+                            .tooltip("Copy code")
+                            .accessibility_label("Copy code"),
+                    ),
             )
         });
 
@@ -2486,7 +2491,7 @@ mod tests {
 
     // Replacing the shared renderer must preserve rendered-copy semantics.
     #[gpui_kit::test]
-    #[ignore = "gpui-kit 0.7.0 drops list/task markers in plain-text copy"]
+    #[ignore = "gpui-kit 0.7.1 drops list/task markers in plain-text copy"]
     fn framework_markdown_list_copy_acceptance(cx: &mut TestAppContext) {
         use gpui_kit::AppContext as _;
         cx.update(crate::bootstrap::init_ui);

@@ -74,6 +74,52 @@ fn publish(
 }
 
 #[gpui_kit::test]
+fn message_clipboard_reads_current_text_and_isolates_feedback(cx: &mut TestAppContext) {
+    use gpui_kit::test::TestWindowExt;
+
+    let (root, view, cx) = setup(cx);
+    for (key, role, id) in [
+        (95000, Role::Assistant, "copy-assistant"),
+        (95001, Role::Assistant, "copy-assistant"),
+        (95002, Role::User, "copy-user"),
+        (95003, Role::User, "copy-user"),
+    ] {
+        let mut snapshot = fixture(key, 1, "Original");
+        Arc::make_mut(
+            Arc::make_mut(&mut snapshot)
+                .conversation
+                .messages
+                .front_mut()
+                .unwrap(),
+        )
+        .role = role;
+        view.update(cx, |app, cx| publish(app, &snapshot, "clipboard", cx));
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            assert_eq!(window.find((id, key)).label(), Some("Copy message"));
+        });
+        // Change the source after painting: copying must resolve the ID at click time.
+        let expected = format!("  Updated 中文 {key}\n");
+        view.update(cx, |app, _| {
+            let messages = &mut Arc::make_mut(&mut app.core.session_view)
+                .conversation
+                .messages;
+            Arc::make_mut(messages.front_mut().unwrap()).text = expected.clone();
+        });
+        cx.update(|window, cx| {
+            window.click((id, key), cx);
+            assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), expected);
+        });
+        // Replace the message immediately; the preceding button's two-second feedback
+        // must not disable the new message occupying the same list position.
+    }
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
 fn code_block_has_balanced_gaps_without_blank_fragment_rows(cx: &mut TestAppContext) {
     let (root, view, cx) = setup(cx);
     let source = "## 四、失败后问用户——这里要修正\n\n```rust\nenum AskForApproval {\n    UnlessTrusted, // 除非有显式规则允许\n    OnRequest,     // 默认值\n    Granular(..),  // 细粒度分类\n    Never,\n}\n```\n\n**`on-failure` 现在只是 `on-request` 的别名**，而后者的语义是：";

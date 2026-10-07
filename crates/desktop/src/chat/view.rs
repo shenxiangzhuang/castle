@@ -1,4 +1,5 @@
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable};
 use gpui_kit::{
@@ -532,7 +533,7 @@ impl DesktopApp {
                                     .text_color(colors.muted_text)
                                     .child(message_time_label(message)),
                             )
-                            .child(copy_message_button("copy-user", index, message, cx))
+                            .child(copy_message_button("copy-user", message, cx))
                             .child(
                                 Button::new(("edit-message", index))
                                     .when(cfg!(test), |button| {
@@ -567,7 +568,7 @@ impl DesktopApp {
                             .items_center()
                             .h(px(28.0))
                             .gap(px(10.0))
-                            .child(copy_message_button("copy-assistant", index, message, cx))
+                            .child(copy_message_button("copy-assistant", message, cx))
                             .child(
                                 Button::new(("fork-assistant", index))
                                     .when(cfg!(test), |button| {
@@ -833,31 +834,28 @@ fn transcript_content_column(content_max_width: f32) -> gpui_kit::Div {
         .mx_auto()
 }
 
-fn copy_message_button(
-    id: &'static str,
-    index: usize,
-    message: &Message,
-    cx: &Context<DesktopApp>,
-) -> Button {
+fn copy_message_button(id: &'static str, message: &Message, cx: &Context<DesktopApp>) -> Clipboard {
     let key = message.key;
-    Button::new((id, index))
-        .icon(IconName::Copy)
-        .ghost()
-        .compact()
+    let owner = cx.entity().downgrade();
+    Clipboard::new((id, key.0))
+        .with_size(gpui_kit::component::Size::Medium)
         .tooltip("Copy message")
-        .on_click(cx.listener(move |this, _, _, cx| {
-            if let Some(message) = this
-                .core
-                .session_view
-                .conversation
-                .messages
-                .iter()
-                .chain(this.core.transient_messages.iter())
-                .find(|message| message.key == key)
-            {
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(message.text.clone()));
-            }
-        }))
+        .accessibility_label("Copy message")
+        .value_fn(move |_, cx| {
+            owner
+                .read_with(cx, |this, _| {
+                    this.core
+                        .session_view
+                        .conversation
+                        .messages
+                        .iter()
+                        .chain(this.core.transient_messages.iter())
+                        .find(|message| message.key == key)
+                        .map(|message| SharedString::from(message.text.clone()))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+        })
 }
 
 fn tab(

@@ -64,7 +64,7 @@ reasoning; settlement immediately restores the stable first line.
 
 ### Framework controls
 
-GPUI Kit 0.7.0 owns popup positioning, menu keyboard navigation and selection, and
+GPUI Kit 0.7.1 owns popup positioning, menu keyboard navigation and selection, and
 modal focus trapping, Escape/Enter routing, and backdrop dismissal. The application
 retains only the current composer menu identity and the modal's business data.
 `PopupMenu` submenus replace the former highlighted-item reducer and keyboard dispatcher.
@@ -77,8 +77,27 @@ the framework Root. Base Dialog supplies centered placement; the custom popup re
 its pointer occlusion and application accessibility labels. Modal business state and
 HTML-preview visibility remain application-owned.
 
-Chat and Trajectory keep their shared Markdown renderer. TextView 0.7.0 fixes ordered-list
-start numbers, but still omits list/task markers in plain-text copy. Source copying
+Message and code-block copy buttons use framework `Clipboard` for clipboard writes,
+accessible names and copied-state feedback. Message buttons resolve the text at click
+time and key feedback by message ID rather than the virtual-list position.
+
+The 0.7.1 upgrade includes upstream IME candidate positioning before repaint (#3297),
+Textarea height (#3330), and soft-wrap/horizontal-scroll (#3358) fixes.
+For native input regression checks, compose Chinese in both empty-session and docked
+composers, cross a soft wrap, move into mixed Chinese/English text, and delete/retype.
+Repeat with Shift+Enter, more than 14 rows, session search, and a dialog input. The caret
+and candidate window must stay beside the composition; selecting an IME candidate must
+not submit the composer or dialog. Headless tests do not establish native IME acceptance.
+
+Native checks on 2026-10-07 used macOS Squirrel (Rime): sequential Pinyin keys and
+Space committed Chinese at the expected insertion position in the composer and session
+search, including middle-of-text edits, composition backspace/retype, a wrapped paragraph,
+and a 16-line draft. This is partial acceptance: automated screenshots returned stale
+frames, so transient caret/candidate-window jumping remains unverified. Automated
+Shift+Return inserted `a` in both Castle and TextEdit; that check is inconclusive.
+
+Chat and Trajectory keep their shared Markdown renderer. TextView displays ordered-list
+start numbers, but the copy acceptance test still fails on 0.7.1: list/task markers are omitted. Source copying
 returns Markdown and does not preserve the application's rendered-copy contract.
 Chat demand, cancellation, cache admission and atomic streaming publication are unchanged.
 

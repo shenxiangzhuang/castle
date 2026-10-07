@@ -179,10 +179,10 @@ fn normalize_latex_math_delimiters(source: &str) -> String {
 
     let mut output = String::with_capacity(source.len());
     let mut index = 0;
-    let mut protected = protected.into_iter().peekable();
+    let mut protected_ranges = protected.iter().peekable();
     let mut replacements = replacements.into_iter().peekable();
     while index < source.len() {
-        if let Some(range) = protected.next_if(|range| range.start == index) {
+        if let Some(range) = protected_ranges.next_if(|range| range.start == index) {
             output.push_str(&source[range.clone()]);
             index = range.end;
             continue;
@@ -202,7 +202,48 @@ fn normalize_latex_math_delimiters(source: &str) -> String {
         output.push(character);
         index += character.len_utf8();
     }
-    output
+    mask_display_math_setext(output, &protected)
+}
+
+fn mask_display_math_setext(source: String, protected: &[std::ops::Range<usize>]) -> String {
+    // Text math leaves a lone `=` to become a setext heading before it sees the closing `$$`.
+    let mut inside = false;
+    let mut pending = Vec::new();
+    let mut masked = Vec::new();
+    let mut protected_index = 0;
+    let mut start = 0;
+    for line in source.split_inclusive('\n') {
+        let end = start + line.len();
+        while protected
+            .get(protected_index)
+            .is_some_and(|range| range.end <= start)
+        {
+            protected_index += 1;
+        }
+        if !protected
+            .get(protected_index)
+            .is_some_and(|range| range.start < end)
+        {
+            match line.trim() {
+                "$$" if inside => {
+                    masked.append(&mut pending);
+                    inside = false;
+                }
+                "$$" => inside = true,
+                "=" if inside => pending.push(start + line.find('=').unwrap()),
+                _ => {}
+            }
+        }
+        start = end;
+    }
+    if masked.is_empty() {
+        return source;
+    }
+    let mut bytes = source.into_bytes();
+    for index in masked {
+        bytes[index] = b'+';
+    }
+    String::from_utf8(bytes).expect("replacing an ASCII equals sign preserves UTF-8")
 }
 
 fn paired_latex_math_delimiters(source: &str, protected: &[std::ops::Range<usize>]) -> Vec<usize> {
@@ -293,7 +334,13 @@ fn split_display_math_paragraph(paragraph: Paragraph, source: &str) -> Vec<Node>
             {
                 push_paragraph(&mut output, &mut inline, fallback_position.as_ref());
                 output.push(Node::Math(Math {
-                    value: math.value.trim().to_owned(),
+                    value: math
+                        .position
+                        .as_ref()
+                        .and_then(|position| source.get(position.start.offset..position.end.offset))
+                        .and_then(|original| original.get(2..original.len().saturating_sub(2)))
+                        .map_or_else(|| math.value.trim(), str::trim)
+                        .to_owned(),
                     position: math.position,
                     meta: None,
                 }));
@@ -527,6 +574,32 @@ mod tests {
     }
 
     #[test]
+    fn standalone_equals_inside_display_math_is_not_a_heading() {
+        let source = "## 第 2 步：把求和切开\n\n$$\no_t\n=\n\\underbrace{\\sum_{i=1}^{t-1} a_{t,i}\\, v_i}_{\\text{历史项}}\n\\;+\\;\n\\underbrace{a_{t,t}\\, v_t}_{\\text{新项}}\n$$";
+        let mut state = StreamingMarkdownState::default();
+        state.update(source);
+        let blocks = state
+            .frozen()
+            .iter()
+            .chain(state.tail_blocks())
+            .map(|block| &block.node)
+            .collect::<Vec<_>>();
+        assert_eq!(blocks.len(), 2, "{blocks:#?}");
+        let Node::Math(math) = blocks[1] else {
+            panic!("expected display formula, got {:?}", blocks[1]);
+        };
+        assert_eq!(
+            math.value,
+            source
+                .split_once("$$\n")
+                .unwrap()
+                .1
+                .strip_suffix("\n$$")
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn line_delimited_display_math_splits_surrounding_text() {
         let source = "before\n$$x^2$$\nafter";
         let mut state = StreamingMarkdownState::default();
@@ -565,6 +638,8 @@ mod tests {
     #[test]
     fn latex_delimiters_inside_code_or_escaped_stay_literal() {
         let source = "`\\(inline\\)`\n\n```tex\n\\[block\\]\n```\n\nliteral \\\\(text\\\\)";
+        assert_eq!(super::normalize_latex_math_delimiters(source), source);
+        let source = "```tex\n$$\nx\n=\n$$\n```\n\n$$\nx\n=";
         assert_eq!(super::normalize_latex_math_delimiters(source), source);
     }
 

@@ -230,7 +230,11 @@ fn mask_display_math_setext(source: String, protected: &[std::ops::Range<usize>]
                     inside = false;
                 }
                 "$$" => inside = true,
-                "=" if inside => pending.push(start + line.find('=').unwrap()),
+                "=" if inside => {
+                    if let Some(offset) = line.find('=') {
+                        pending.push(start + offset);
+                    }
+                }
                 _ => {}
             }
         }
@@ -239,11 +243,15 @@ fn mask_display_math_setext(source: String, protected: &[std::ops::Range<usize>]
     if masked.is_empty() {
         return source;
     }
-    let mut bytes = source.into_bytes();
+    let mut output = String::with_capacity(source.len());
+    let mut start = 0;
     for index in masked {
-        bytes[index] = b'+';
+        output.push_str(&source[start..index]);
+        output.push('+');
+        start = index + 1;
     }
-    String::from_utf8(bytes).expect("replacing an ASCII equals sign preserves UTF-8")
+    output.push_str(&source[start..]);
+    output
 }
 
 fn paired_latex_math_delimiters(source: &str, protected: &[std::ops::Range<usize>]) -> Vec<usize> {

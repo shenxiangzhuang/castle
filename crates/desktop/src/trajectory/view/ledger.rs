@@ -256,6 +256,7 @@ impl DesktopApp {
                 self.trajectory_ledger_width
                     .filter(|(generation, _)| *generation == self.core.layout_generation)
                     .map(|(_, width)| tool_request_column_width(f32::from(width), compact)),
+                cx.theme().mono_font_family.clone(),
             ))
             .on_mouse_down(
                 MouseButton::Left,

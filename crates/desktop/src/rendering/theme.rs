@@ -3,6 +3,47 @@ use std::sync::{Arc, LazyLock};
 use gpui_kit::component::{ActiveTheme, highlighter::HighlightTheme};
 use gpui_kit::{App, Hsla, rgb, rgba};
 
+/// Load the same Latin/CJK and code faces on every desktop before laying out text.
+/// Register once per App, including test Apps; do not rely on installed fonts.
+pub(crate) fn init_fonts(cx: &mut App) {
+    use std::borrow::Cow;
+    let result = cx.text_system().add_fonts(vec![
+        Cow::Borrowed(include_bytes!(
+            "../../assets/fonts/SourceHanSansCN-Regular.otf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../../assets/fonts/SourceHanSansCN-Bold.otf"
+        )),
+        Cow::Borrowed(include_bytes!(
+            "../../assets/fonts/SourceCodePro-Regular.otf"
+        )),
+        Cow::Borrowed(include_bytes!("../../assets/fonts/SourceCodePro-Bold.otf")),
+    ]);
+    if let Err(error) = result {
+        eprintln!("failed to load desktop fonts: {error}");
+        return;
+    }
+    gpui_kit::component::Theme::update(cx, |theme| {
+        theme.font_family = "Source Han Sans CN".into();
+        theme.mono_font_family = "Source Code Pro".into();
+    });
+}
+
+pub(crate) fn body_font(cx: &App) -> gpui_kit::Font {
+    gpui_kit::Font {
+        fallbacks: Some(gpui_kit::FontFallbacks::from_fonts(vec![
+            cx.theme().font_family.to_string(),
+        ])),
+        ..gpui_kit::font(cx.theme().font_family.clone())
+    }
+}
+
+pub(crate) const SIDEBAR_SHORTCUT_TOOLTIP: &str = if cfg!(target_os = "macos") {
+    "Toggle sidebar (⌘B)"
+} else {
+    "Toggle sidebar (Ctrl+B)"
+};
+
 #[derive(Clone, Copy)]
 pub(crate) struct UiPalette {
     pub(crate) canvas: Hsla,
@@ -50,10 +91,15 @@ pub(crate) struct TrajectoryPalette {
 pub(crate) mod metrics {
     pub(crate) const SIDEBAR_WIDTH: f32 = 280.0;
     pub(crate) const TITLEBAR_HEIGHT: f32 = 40.0;
-    pub(crate) const SIDEBAR_TOGGLE_WINDOWED_LEADING: f32 = 80.0;
+    pub(crate) const SIDEBAR_TOGGLE_WINDOWED_LEADING: f32 = if cfg!(target_os = "macos") {
+        80.0
+    } else {
+        12.0
+    };
     pub(crate) const SIDEBAR_TOGGLE_FULLSCREEN_LEADING: f32 = 0.0;
-    pub(crate) const COLLAPSED_TITLEBAR_CONTROLS_WIDTH: f32 = 224.0;
-    pub(crate) const COLLAPSED_CONTENT_LEADING: f32 = 240.0;
+    pub(crate) const COLLAPSED_TITLEBAR_CONTROLS_WIDTH: f32 =
+        SIDEBAR_TOGGLE_WINDOWED_LEADING + 144.0;
+    pub(crate) const COLLAPSED_CONTENT_LEADING: f32 = COLLAPSED_TITLEBAR_CONTROLS_WIDTH + 16.0;
     pub(crate) const COMPOSER_RADIUS: f32 = 22.0;
     pub(crate) const COMPOSER_CONTROLS_BOTTOM_INSET: f32 = 16.0;
     pub(crate) const ASSISTANT_ACTIONS_TOP_GAP: f32 = 8.0;

@@ -35,6 +35,9 @@ jobs:
           test ! -f /etc/apt/apt-mirrors.txt || sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
           sudo apt-get install -y libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+      - name: Verify bundled desktop font resources
+        working-directory: crates/desktop/assets/fonts
+        run: sha256sum -c SHA256SUMS
       - run: python3 scripts/release-matrix.py --self-test
       - run: node crates/desktop/tests/html-preview-bootstrap.cjs
       - run: cargo fmt --all --check

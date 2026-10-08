@@ -15,7 +15,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ElementExt, Icon, IconName, Sizable};
+use gpui_kit::component::{ActiveTheme, ElementExt, Icon, IconName, Sizable};
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Role, ScrollStrategy, ScrollWheelEvent,
@@ -1725,6 +1725,7 @@ fn trajectory_record_preview(
     colors: TrajectoryPalette,
     opacity: f32,
     tool_request_width: Option<f32>,
+    mono_font: SharedString,
 ) -> gpui_kit::AnyElement {
     if record.kind != TrajectoryKind::Tool {
         return div()
@@ -1769,7 +1770,7 @@ fn trajectory_record_preview(
                 })
                 .min_w(px(0.0))
                 .truncate()
-                .font_family("monospace")
+                .font_family(mono_font)
                 .text_color(colors.label_secondary.opacity(opacity))
                 .child(request),
         )

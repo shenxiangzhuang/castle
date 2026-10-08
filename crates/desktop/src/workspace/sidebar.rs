@@ -112,7 +112,7 @@ impl DesktopApp {
                     .icon(IconName::PanelLeft)
                     .ghost()
                     .compact()
-                    .tooltip("Toggle sidebar (⌘B)")
+                    .tooltip(crate::rendering::theme::SIDEBAR_SHORTCUT_TOOLTIP)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
             .child(
@@ -128,7 +128,11 @@ impl DesktopApp {
                 div()
                     .flex_1()
                     .h_full()
-                    .window_control_area(WindowControlArea::Drag),
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        crate::platform::linux_titlebar_mouse_down,
+                    ),
             )
             .child(div().h(px(24.0)).border_l_1().border_color(colors.border));
         panel.into_any_element()
@@ -147,14 +151,18 @@ impl DesktopApp {
                     .icon(IconName::PanelLeft)
                     .ghost()
                     .compact()
-                    .tooltip("Toggle sidebar (⌘B)")
+                    .tooltip(crate::rendering::theme::SIDEBAR_SHORTCUT_TOOLTIP)
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
             .child(
                 div()
                     .flex_1()
                     .h_full()
-                    .window_control_area(WindowControlArea::Drag),
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        crate::platform::linux_titlebar_mouse_down,
+                    ),
             )
     }
 

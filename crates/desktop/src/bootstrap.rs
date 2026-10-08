@@ -30,6 +30,7 @@ const DATA_ROOT_ENV: &str = "CASTLE_DATA_DIR";
 pub(crate) fn init_ui(cx: &mut App) {
     cx.set_global(crate::session::ApplicationHarness::default());
     gpui_kit::init(cx);
+    ui_theme::init_fonts(cx);
     register_syntax_languages();
 }
 
@@ -48,6 +49,7 @@ pub(crate) fn register_syntax_languages() {
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    crate::platform::display::prepare()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -203,7 +205,13 @@ fn desktop_window_options(cx: &App) -> WindowOptions {
             appears_transparent: true,
             traffic_light_position: None,
         }),
-        window_background: WindowBackgroundAppearance::Blurred,
+        window_background: if cfg!(target_os = "linux") {
+            // Client-side frame shadows need alpha; the application surface stays opaque.
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
+        window_decorations: Some(gpui_kit::WindowDecorations::Client),
         app_id: Some("dev.castle.desktop".into()),
         ..Default::default()
     }
@@ -216,12 +224,13 @@ struct StartupErrorView {
 impl Render for StartupErrorView {
     fn render(
         &mut self,
-        _window: &mut gpui_kit::Window,
+        window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = ui_theme::palette(cx);
         div()
             .id("startup-error")
+            .relative()
             .role(Role::Alert)
             .aria_label("Castle startup error")
             .size_full()
@@ -230,6 +239,7 @@ impl Render for StartupErrorView {
             .justify_center()
             .bg(colors.canvas)
             .text_color(colors.text)
+            .font(ui_theme::body_font(cx))
             .child(
                 div()
                     .max_w(px(560.0))
@@ -254,6 +264,7 @@ impl Render for StartupErrorView {
                             .child("Close Castle and reopen it after fixing the problem."),
                     ),
             )
+            .children(crate::platform::window_controls(window, cx))
     }
 }
 
@@ -435,5 +446,44 @@ mod tests {
                 .iter()
                 .any(|model| model.provider_id == OPENAI_PROVIDER_ID)
         );
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    #[gpui_kit::test]
+    fn bundled_fonts_survive_theme_switches(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            super::init_ui(cx);
+            for mode in [
+                gpui_kit::component::ThemeMode::Dark,
+                gpui_kit::component::ThemeMode::Light,
+            ] {
+                gpui_kit::component::Theme::change(mode, None, cx);
+                let theme = gpui_kit::component::Theme::global(cx);
+                assert_eq!(theme.font_family.as_ref(), "Source Han Sans CN");
+                assert_eq!(theme.mono_font_family.as_ref(), "Source Code Pro");
+            }
+        });
+    }
+    #[gpui_kit::test]
+    fn custom_titlebar_has_explicit_decorations_and_compatible_background(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let options = super::desktop_window_options(cx);
+            assert_eq!(
+                options.window_decorations,
+                Some(gpui_kit::WindowDecorations::Client)
+            );
+            assert_eq!(
+                options.window_background,
+                if cfg!(target_os = "linux") {
+                    gpui_kit::WindowBackgroundAppearance::Transparent
+                } else {
+                    gpui_kit::WindowBackgroundAppearance::Opaque
+                }
+            );
+        });
     }
 }

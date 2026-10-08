@@ -92,7 +92,7 @@ impl Render for DesktopApp {
             .when(archived, |main| main.child(self.archived_session_view(cx)))
             .when(!archived, |main| main.children(failure_banner))
             .when(!archived && show_header, |main| {
-                main.child(self.conversation_header(cx))
+                main.child(self.conversation_header(window, cx))
             })
             .when(!archived && empty, |main| {
                 main.child(self.empty_conversation(cx))
@@ -104,8 +104,11 @@ impl Render for DesktopApp {
             });
         let main = if let Some(preview) = (!archived)
             .then(|| {
-                self.html_previews
-                    .sidebar(&self.core.session_view.conversation.messages, cx)
+                self.html_previews.sidebar(
+                    &self.core.session_view.conversation.messages,
+                    window,
+                    cx,
+                )
             })
             .flatten()
         {
@@ -172,10 +175,12 @@ impl Render for DesktopApp {
             )
             .bg(colors.canvas)
             .text_color(colors.text)
+            .font(crate::rendering::theme::body_font(cx))
             .child(content)
             .when(sidebar_mode == SidebarMode::Rail, |root| {
                 root.child(self.sidebar(window, cx))
             })
+            .children(crate::platform::window_controls(window, cx))
             .children(self.modal_view(window, cx));
         self.html_previews.frame(
             root,

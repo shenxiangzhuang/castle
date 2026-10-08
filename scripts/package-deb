@@ -25,8 +25,9 @@ install -m 644 "$repo/crates/desktop/resources/castle.desktop" \
     "$root/usr/share/applications/castle.desktop"
 install -m 644 "$repo/crates/desktop/assets/app-icon-512.png" \
     "$root/usr/share/icons/hicolor/512x512/apps/castle.png"
+install -m 644 "$repo/crates/desktop/assets/fonts/"LICENSE* "$root/usr/share/doc/castle-desktop/"
 install -m 644 "$repo/LICENSE" "$root/usr/share/doc/castle-desktop/copyright"
 printf 'Package: castle-desktop\nVersion: %s\nArchitecture: %s\nMaintainer: castle contributors <shenxiangzhuang@users.noreply.github.com>\nDepends: %s\nSection: utils\nPriority: optional\nDescription: Native desktop interface for Castle\n' \
-    "$debian_version" "$architecture" "$depends" > "$root/DEBIAN/control"
+    "$debian_version" "$architecture" "$depends, xwayland" > "$root/DEBIAN/control"
 
 dpkg-deb --root-owner-group --build "$root" "$output"

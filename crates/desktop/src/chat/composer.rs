@@ -5,7 +5,7 @@ use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Disableable, Icon, IconName, Side};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Side};
 use gpui_kit::{
     Context, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
@@ -550,7 +550,7 @@ impl DesktopApp {
                                 .child(
                                     div()
                                         .truncate()
-                                        .font_family("SF Mono")
+                                        .font_family(cx.theme().mono_font_family.clone())
                                         .text_xs()
                                         .text_color(colors.muted_text)
                                         .child(approval.arguments.clone()),

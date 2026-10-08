@@ -232,6 +232,26 @@ append; the regression requires unchanged geometry, rich intermediate frames and
 append. A second test checks progress during continued appends and rejection after rewrite/switch.
 These are GPUI headless layout checks, not a native display frame-time measurement.
 
+### Desktop platform presentation
+
+All desktop builds embed unmodified SIL OFL Source Han Sans CN (Latin/CJK) and Source Code Pro
+(regular/bold), registered before creating windows. Theme mode changes preserve these families;
+code text inherits the bundled CJK fallback from the app surface. Font sources and checksums live
+in `crates/desktop/assets/fonts/`. Native font rasterization and emoji remain OS-dependent.
+
+The custom window requests client decorations. GPUI Kit's root owns Linux borders/resize zones;
+its `TitleBar` supplies supported minimize/maximize/close controls at the top right on Windows
+and client-decorated Linux, including empty/error/archived views. Server-decorated Linux and
+fullscreen windows do not draw a duplicate set. Header/preview actions reserve the controls'
+space. macOS retains native traffic lights. Only macOS reserves their 80 px leading slot;
+other platforms use 12 px, and collapsed-header spacing follows that slot. X11 drag regions
+explicitly move/zoom the window because GPUI's control-area hit testing is Windows-specific.
+Window backgrounds use alpha only for Linux frame shadows; content backgrounds stay opaque.
+Sidebar shortcut hints follow Command/Control conventions.
+
+Repeatable visual and interaction acceptance: [desktop platform checks](../development/desktop-platforms.md).
+Headless tests protect theme/layout policy; they do not establish native IME, WebView, or DPI parity.
+
 ### Inline HTML previews
 
 Top-level fenced `html`/`htm` blocks in assistant messages render automatically as interactive
@@ -398,9 +418,14 @@ scroll over its cells in both directions, at its boundaries, and after moving it
 
 Native backends use Wry: WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux/X11. Linux build
 jobs install `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`; Debian runtime dependencies come from
-`dpkg-shlibdeps`. GPUI's native Wayland windows cannot host Wry's X11 child views: creation errors
-are shown alongside selectable source. Windows requires the
-WebView2 runtime. Cross-platform native behavior must be verified on each target OS.
+`dpkg-shlibdeps`. GPUI's native Wayland windows cannot host Wry's X11 child views. Before UI/runtime threads
+start, `platform/display.rs` replaces a Wayland-session process with the same executable and
+arguments, removing only `WAYLAND_DISPLAY` when `DISPLAY` is available. This selects XWayland
+for both GPUI and WebKitGTK, without mutating a multithreaded process's environment. Native X11
+and explicit headless runs are unchanged; sessions without X11/XWayland receive a startup error.
+Debian packages require `xwayland`; AppImage users need it enabled in their desktop session.
+Windows requires the WebView2 runtime. Cross-platform native behavior must be verified on each
+target OS.
 
 For repeatable native checks without providers or private sessions, the **debug full application**
 accepts `CASTLE_PREVIEW_MARKDOWN`. The release binary does not contain this fixture entry point:

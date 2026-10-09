@@ -5,19 +5,24 @@
 html,body{margin:0;width:100%;height:100%;overflow:hidden;overscroll-behavior:none;color:#334155;background:transparent}
 iframe{position:absolute;border:0;display:block;width:640px;height:240px}
 #source{display:none;position:absolute;inset:0;box-sizing:border-box;margin:0;padding:48px 20px 20px;overflow:auto;white-space:pre;font:12px/1.65 ui-monospace,monospace;background:#f8fafc;color:#334155;tab-size:2}
+#error{position:absolute;z-index:3;bottom:12px;left:20px;right:20px;padding:8px 12px;border-radius:6px;background:#fff1f2;color:#9f1239;font:12px/1.5 system-ui;overflow-wrap:anywhere}#error:empty,body.source #error{display:none}
+#loading{display:none;position:absolute;z-index:2;inset:0;align-items:center;justify-content:center;gap:7px;color:#64748b;font:12px/1.5 system-ui;pointer-events:none}
+body.rendering #loading{display:flex}body.rendering iframe{visibility:hidden}.spinner{width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
 body.source #source{display:block}body.source iframe{visibility:hidden}
 #tools{position:absolute;z-index:2;top:28px;right:28px;display:flex;gap:2px;padding:3px;border:1px solid #64748b1f;border-radius:8px;background:#fffffff5;box-shadow:0 1px 4px #0f172a0d;user-select:none;-webkit-user-select:none;cursor:default;opacity:0;transition:opacity .12s}
 body:hover #tools,#tools:focus-within,body.source #tools{opacity:1}
 button{display:grid;place-items:center;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:inherit;cursor:pointer}
 button:hover,button[data-active=true]{background:#64748b18}button:focus-visible{outline:2px solid #7187a0;outline-offset:1px}button:disabled{opacity:.35;cursor:wait}
 svg{width:15px;height:15px;pointer-events:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-body.capturing #tools,body.capturing #source{display:none!important}body.capturing iframe{visibility:visible!important}
+body.capturing #tools,body.capturing #source,body.capturing #loading,body.source #loading{display:none!important}body.capturing iframe{visibility:visible!important}
 @media(hover:none){#tools{opacity:1}}
-@media(prefers-reduced-motion:reduce){#tools{transition:none}}
-html.dark{color:#cbd5e1}html.dark #tools{background:#202630ed;border-color:#94a3b833}html.dark #source{background:#171d26;color:#d4deeb}
+@media(prefers-reduced-motion:reduce){#tools{transition:none}.spinner{animation:none}}
+html.dark{color:#cbd5e1}html.dark #tools{background:#202630ed;border-color:#94a3b833}html.dark #source{background:#171d26;color:#d4deeb}html.dark #loading{color:#cbd5e1}
 </style>
 <iframe sandbox="allow-scripts" title="Interactive HTML preview" referrerpolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen 'none'"></iframe>
 <pre id="source" tabindex="0" aria-label="HTML source"></pre>
+<div id="error" role="status"></div>
+<div id="loading" role="status"><span class="spinner" aria-hidden="true"></span><span>渲染中</span></div>
 <div id="tools" role="toolbar" aria-label="Preview actions">
 <button id="download" title="保存为图片" aria-label="保存为图片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg></button>
 <button id="expand" title="在右侧栏打开" aria-label="在右侧栏打开"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M14 3v18"/></svg></button>
@@ -26,13 +31,28 @@ html.dark{color:#cbd5e1}html.dark #tools{background:#202630ed;border-color:#94a3
 <script>
 (() => {
   const frame = document.querySelector('iframe');
-  const send = data => window.ipc.postMessage(JSON.stringify({...data, generation:__GENERATION__, token:__TOKEN__}));
+  let generation = __GENERATION__, streaming = __STREAMING__, frameReady = false;
+  const send = data => window.ipc.postMessage(JSON.stringify({...data, generation, token:__TOKEN__}));
   const source = document.querySelector('#source');
   const tools = document.querySelector('#tools');
   const download = document.querySelector('#download');
   const expand = document.querySelector('#expand');
   const code = document.querySelector('#code');
   source.textContent = __SOURCE__;
+  let published, rendered = false, measuredHeight;
+  const loading = () => document.body.classList.toggle('rendering', !rendered);
+  const publish = () => {
+    if (!frameReady || streaming || published !== undefined) return;
+    published = generation;
+    // Publish once through the HTML parser, which owns module and DOM-ready ordering.
+    frame.srcdoc = bootstrap.replace('<script>', '<script data-generation="'+generation+'" data-expanded="'+expanded+'">') + source.textContent;
+  };
+  window.previewUpdate = (html, pending, revision) => {
+    if (published !== undefined) return;
+    generation = revision; streaming = pending; source.textContent = html;
+    document.querySelector('#error').textContent = '';
+    publish();
+  };
   let dark = __DARK__, expanded = false, sourceMode = false;
   window.previewLayout = (width, height, x, y, top = 0, bottom = 0) => {
     Object.assign(frame.style, {width:width+'px', height:height+'px', left:x+'px', top:y+'px'});
@@ -99,14 +119,34 @@ html.dark{color:#cbd5e1}html.dark #tools{background:#202630ed;border-color:#94a3
   window.addEventListener('message', event => {
     if (event.source !== frame.contentWindow || !event.data || typeof event.data !== 'object') return;
     const data = event.data;
+    if (data.generation !== generation) return;
+    if (data.kind === 'height') {
+      if (published !== generation) return;
+      measuredHeight = data.height;
+      if (!rendered) return;
+    }
+    if (data.kind === 'rendered' && published === generation) {
+      rendered = true;
+      loading();
+      if (measuredHeight !== undefined) send({kind:'height', height:measuredHeight});
+    }
+    if (data.kind === 'error') {
+      document.querySelector('#error').textContent = 'HTML: ' + String(data.message).slice(0, 240);
+      document.body.classList.remove('rendering');
+    }
     if (['height','error'].includes(data.kind) || (data.kind === 'wheel' && !expanded)) send(data);
     if (data.kind === 'escape') escape();
   });
   frame.addEventListener('load', () => {
+    frameReady = true;
+    publish();
+    loading();
     window.previewTheme(dark);
     window.previewMode(expanded, sourceMode);
   });
-  frame.srcdoc = __DOCUMENT__;
+  const bootstrap = __DOCUMENT__;
+  frame.srcdoc = bootstrap;
+  loading();
   window.previewTheme(dark);
   send({kind:'ready'});
 })();

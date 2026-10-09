@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-for case in stale:CurrentOnly stale-ready:ReadyOnly exclusive:MountedDocumentsVisible sidebar-source:CurrentOnly none:MultiplePreviewsReachable none:SidebarAndInlineReachable none:UpdatedSidebarAloneReachable none:StreamingReadyReachable; do
+for case in partial:CompleteOnly unprepared:CompleteOnly early:InitializedOnly stale:InitializedOnly repeat:AtMostOnce none:RenderedReachable; do
     fault=${case%:*}
     invariant=${case#*:}
     name="probe-$fault"

@@ -56,6 +56,7 @@ pub(crate) struct SourceChunk {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CodeSlice {
+    html: bool,
     source: Range<usize>,
     visible: Range<usize>,
 }
@@ -263,6 +264,7 @@ fn semantic_chunks(source: &str, cancel: &AtomicBool) -> Option<Vec<SourceChunk>
                     literal: false,
                     gap_before: Some(gap),
                     code: Some(CodeSlice {
+                        html: true,
                         source: code_start..block.key + block.source.len(),
                         visible: 0..code.value.len(),
                     }),
@@ -306,6 +308,7 @@ fn semantic_chunks(source: &str, cancel: &AtomicBool) -> Option<Vec<SourceChunk>
                     literal: false,
                     gap_before: Some(if i == 0 { gap } else { 0 }),
                     code: Some(CodeSlice {
+                        html: false,
                         source: code_start..block.key + block.source.len(),
                         visible,
                     }),
@@ -465,6 +468,12 @@ impl ChatRow {
             source.to_owned()
         }
     }
+    pub(crate) fn is_html(&self) -> bool {
+        self.chunk
+            .as_ref()
+            .and_then(|chunk| chunk.code.as_ref())
+            .is_some_and(|code| code.html)
+    }
     pub(crate) fn code_visible(&self) -> Option<Range<usize>> {
         self.chunk
             .as_ref()?
@@ -614,7 +623,8 @@ impl ChatViewport {
             self.restore_pending();
             return;
         }
-        let anchor = self.pending_anchor.take().unwrap_or_else(|| self.anchor());
+        let requested_anchor = self.pending_anchor.take();
+        let anchor = requested_anchor.unwrap_or_else(|| self.anchor());
         let previous = std::mem::take(&mut self.rows);
         let old_rows = previous
             .iter()
@@ -805,12 +815,26 @@ impl ChatViewport {
             .zip(new_rows[prefix..].iter().rev())
             .take_while(|(old, new)| old == new)
             .count();
-        self.list.splice(
-            prefix..old_rows.len() - suffix,
-            new_rows.len() - prefix - suffix,
-        );
-        self.pending_anchor = Some(anchor);
-        self.restore_pending();
+        if old_rows.len() == new_rows.len()
+            && old_rows
+                .iter()
+                .zip(&new_rows)
+                .all(|(old, new)| old.0 == new.0)
+        {
+            // Source revisions do not replace row identities; preserve measured size hints.
+            self.list.remeasure_items(prefix..new_rows.len() - suffix);
+            if requested_anchor.is_some() {
+                self.pending_anchor = Some(anchor);
+                self.restore_pending();
+            }
+        } else {
+            self.list.splice(
+                prefix..old_rows.len() - suffix,
+                new_rows.len() - prefix - suffix,
+            );
+            self.pending_anchor = Some(anchor);
+            self.restore_pending();
+        }
     }
     fn install_index(&mut self, row: &ChatRow, chunks: Vec<SourceChunk>) {
         let anchor = self.anchor();
@@ -832,14 +856,23 @@ impl ChatViewport {
             .iter()
             .map(|r| (r.key, r.revision))
             .collect::<HashMap<_, _>>();
+        let same_rows = replacement.len() == end - start
+            && self.rows[start..end]
+                .iter()
+                .zip(&replacement)
+                .all(|(old, new)| old.key == new.key);
         self.rows.splice(start..end, replacement);
         self.presentations.retain(|key, entry| {
             key.message != row.key.message || revisions.get(key) == Some(&entry.revision)
         });
         self.requested.clear();
-        self.list.splice(start..end, count);
-        self.pending_anchor = Some(anchor);
-        self.restore_pending();
+        if same_rows {
+            self.list.remeasure_items(start..end);
+        } else {
+            self.list.splice(start..end, count);
+            self.pending_anchor = Some(anchor);
+            self.restore_pending();
+        }
     }
     fn latest_message<'a>(&'a self, row: &'a ChatRow) -> &'a Arc<Message> {
         self.messages
@@ -1563,6 +1596,59 @@ mod tests {
             revision: 1,
             chunk: Some(chunk),
         }
+    }
+
+    #[gpui_kit::test]
+    fn html_append_preserves_scrollbar_geometry_before_next_paint(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{IntoElement, Render, Styled, div, size};
+        struct ListHarness(ListState);
+        impl Render for ListHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                gpui_kit::list(self.0.clone(), |_, _, _| {
+                    div().h(px(240.0)).into_any_element()
+                })
+                .size_full()
+            }
+        }
+        let source = "```html\n<p>Start</p>";
+        let mut chat = ChatViewport::default();
+        chat.sync(
+            &Vector::unit(message(source.into(), 1)),
+            &Vector::new(),
+            &MessagePresentationStore::default(),
+            1,
+            false,
+        );
+        let row = chat.rows[0].clone();
+        chat.install_index(
+            &row,
+            semantic_chunks(source, &AtomicBool::new(false)).unwrap(),
+        );
+        let (_, cx) = cx.add_window_view(|_, _| ListHarness(chat.list.clone()));
+        cx.simulate_resize(size(px(500.0), px(100.0)));
+        cx.run_until_parked();
+        let before = (
+            chat.list.max_offset_for_scrollbar(),
+            chat.list.scroll_px_offset_for_scrollbar(),
+        );
+        assert!(before.0.y > px(0.0));
+        let next = format!("{source}<p>Appended</p>");
+        let mut row = chat.rows[0].clone();
+        row.message = message(next.clone(), 2);
+        chat.install_index(
+            &row,
+            semantic_chunks(&next, &AtomicBool::new(false)).unwrap(),
+        );
+        assert_eq!(
+            (
+                chat.list.max_offset_for_scrollbar(),
+                chat.list.scroll_px_offset_for_scrollbar()
+            ),
+            before,
+            "publishing an HTML append must retain measured size hints before the list paints"
+        );
     }
 
     #[test]

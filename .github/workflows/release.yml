@@ -90,6 +90,7 @@ jobs:
         run: |
           mkdir -p target/velopack-input
           cp target/${{ matrix.target }}/release/${{ matrix.main_exe }} target/velopack-input/
+          cp crates/desktop/assets/fonts/LICENSE* target/velopack-input/
           if [[ "$RUNNER_OS" == Linux ]]; then
             cp crates/desktop/assets/app-icon-512.png target/velopack-icon.png
           fi

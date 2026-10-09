@@ -470,6 +470,7 @@ impl HtmlPreviews {
     pub(crate) fn sidebar(
         &self,
         messages: &im::Vector<std::sync::Arc<crate::session::Message>>,
+        window: &Window,
         cx: &mut Context<DesktopApp>,
     ) -> Option<AnyElement> {
         let mut state = self.store.borrow_mut();
@@ -581,7 +582,8 @@ impl HtmlPreviews {
                         .items_center()
                         .justify_between()
                         .h(px(crate::rendering::theme::metrics::TITLEBAR_HEIGHT))
-                        .px_3()
+                        .pl_3()
+                        .pr(px(12.0 + crate::platform::window_controls_width(window)))
                         .border_b_1()
                         .border_color(colors.border)
                         .text_sm()

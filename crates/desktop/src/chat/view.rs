@@ -93,7 +93,11 @@ impl DesktopApp {
             }))
     }
 
-    pub(crate) fn conversation_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn conversation_header(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = palette(cx);
         let trajectory_colors = trajectory_palette(cx);
         let title_left_padding = if self.core.layout.sidebar == SidebarMode::Rail {
@@ -117,7 +121,7 @@ impl DesktopApp {
                     .justify_between()
                     .h(px(40.0))
                     .pl(title_left_padding)
-                    .pr_5()
+                    .pr(px(20.0 + crate::platform::window_controls_width(window)))
                     .child(
                         div()
                             .flex()
@@ -126,6 +130,10 @@ impl DesktopApp {
                             .min_w(px(0.0))
                             .gap_3()
                             .window_control_area(WindowControlArea::Drag)
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Left,
+                                crate::platform::linux_titlebar_mouse_down,
+                            )
                             .child(
                                 div()
                                     .max_w(px(460.0))

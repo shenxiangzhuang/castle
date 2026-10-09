@@ -27,10 +27,20 @@ must stop participating in native hit testing when hidden, otherwise it can bloc
 sibling while contributing no pixels. `displayed` abstracts the complete native attachment, not
 just the browser child. The model does not execute AppKit hit testing; the desktop native
 acceptance steps cover scroll-away/remount and overlay hide/show of retained containers.
-The native WebView is reused for append-only source changes, while `Rewrite`/`Frame` describe the
-logical document retirement and publication inside it. Native allocation cost and reuse are
-implementation details outside this model; the Rust streaming regression checks retained layout
-and preview state, and the host attaches document generations to IPC callbacks after each reload.
+The native WebView and opaque iframe are reused for append-only source changes. `Rewrite`/`Frame`
+describe logical content generations and native mounts, without browser navigation.
+Generated content publication is separately modeled in [HTML publication](../html-publication/README.md). `hosts` and `ready` describe allocation identity independently of source versions:
+`QueueReady`/`ReceiveReady` may deliver the initial ready callback after source replacement.
+`ReadyOnly` rejects callbacks from retired namespaces/hosts; the `stale-ready` fault exercises it.
+`StreamingReadyReachable` requires acceptance of readiness queued before a source update.
+
+The host retains partial source without parsing or displaying it. Fence closure publishes the
+full document once; only the current document's initialization acknowledgement can reveal it.
+Initial height is buffered until reveal, keeping loading geometry fixed. Headless Rust checks
+fence-only completion, retained mounts during pending preparation, and scrollbar range/offset
+before the next paint. JS checks no partial publication, retained iframe identity, one-time
+initialization, generation filtering and visible script errors. Pixel continuity remains a
+native acceptance boundary.
 The selected sidebar has its own bounded background preparation, independent of chat visibility.
 `Frame` abstracts successful preparation/publication; worker scheduling and cancellation are outside
 this model. Rust checks the worker's sidebar generation, namespace, lineage and append ancestry before
@@ -42,8 +52,9 @@ of that geometry; rounded masks and platform hit testing remain outside this lif
 Rust checks an overlapping button's cutout, surrounding native pixels/input, unchanged layout,
 and removal after clicking. Native acceptance checks actual visibility and click-through.
 
-Bounds/assumptions: one source replacement per page, one namespace switch, at most two queued callbacks (delivered in either order),
-and atomic frame publication. Browser process isolation, CSP enforcement, WebKit/WebView2
+Bounds/assumptions: one source replacement per page, one namespace switch, at most two queued
+content callbacks (delivered in either order), one queued initial-ready callback for the
+representative inline page a, and atomic frame publication. Browser process isolation, CSP enforcement, WebKit/WebView2
 behavior, pixel clipping, native cursor ownership/glyphs, wheel routing, height convergence, image encoding/save-dialog cancellation, performance and memory are outside
 TLC; Rust tests and the documented native fixture cover those implementation boundaries.
 The bounded lifecycle model distinguishes inline and sidebar tokens and rejects retired source

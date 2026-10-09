@@ -13,6 +13,7 @@ command reservations, atomic snapshot/subscription, explicit lag and shutdown se
 | [Harness connection](harness-connection/README.md) | [Core architecture](../overview.md) | Durable command deduplication, observer gaps, disconnection and join |
 | [Chat presentation](chat-presentation/README.md) | [Desktop](../desktop.md#chat-viewport) | Viewport demand, freshness, cancellation, and bounded workers |
 | [Inline HTML](html-preview/README.md) | [Desktop](../desktop.md#inline-html-previews) | Multiple live documents, visibility, retention and stale callback rejection |
+| [HTML publication](html-publication/README.md) | [Desktop](../desktop.md#inline-html-previews) | Complete-only publication, initialization acknowledgement and stale completion rejection |
 | [HTML scrolling](html-scroll/README.md) | [Desktop](../desktop.md#inline-html-previews) | Exclusive wheel ownership, short content, boundary handoff and eventual delivery |
 | [Conversation tree](conversation-tree/README.md) | [Conversation tree](../conversation-tree.md) | Immutable parents, path isolation, atomic edit/fork and commit publication |
 | [Input queue](input-queue/README.md) | [Session](../session.md#pending-input-control) | Durable pending messages, promotion, cancellation, attachment and stop/resume |

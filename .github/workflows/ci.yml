@@ -63,6 +63,8 @@ jobs:
       - run: cargo test -p agent --locked
       - run: cargo test -p harness --locked
       - run: cargo test --workspace --locked
+      - if: runner.os == 'macOS'
+        run: swift crates/desktop/tests/html-preview-webkit.swift
       - run: cargo test --locked -p ratex-font-loader -p ratex-unicode-font
 
   build:

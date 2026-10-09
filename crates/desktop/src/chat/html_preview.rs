@@ -78,6 +78,8 @@ struct Preview {
     source: String,
     source_prefix: String,
     generation: u64,
+    host_generation: u64,
+    streaming: bool,
     height: f32,
     source_mode: bool,
     placement: Option<Placement>,
@@ -95,10 +97,13 @@ struct Preview {
 }
 impl Preview {
     fn new(source: String, source_prefix: String, generation: u64, dark: bool) -> Self {
+        let streaming = open_fence(&source_prefix);
         Self {
             source,
             source_prefix,
             generation,
+            host_generation: generation,
+            streaming,
             height: INITIAL_HEIGHT,
             source_mode: false,
             placement: None,
@@ -117,6 +122,7 @@ impl Preview {
     }
 
     fn replace_source(&mut self, source: String, prefix: String, generation: u64) {
+        self.streaming = open_fence(&prefix);
         self.source = source;
         self.source_prefix = prefix;
         self.generation = generation;
@@ -207,18 +213,32 @@ impl HtmlPreviews {
                 if owner
                     .update_in(cx, |app, window, cx| {
                         let mut store = app.html_previews.store.borrow_mut();
+                        // Host readiness belongs to the browser allocation, even if source
+                        // advances before WebKit finishes its first navigation.
+                        if matches!(message.event, BrowserEvent::Ready) {
+                            if let Some(preview) = store.entries.get_mut(&message.key)
+                                && preview.host_generation == message.generation
+                            {
+                                preview.loaded = true;
+                                window.refresh();
+                                return;
+                            }
+                            if let Some((key, preview)) = &mut store.sidebar
+                                && *key == message.key
+                                && preview.host_generation == message.generation
+                            {
+                                preview.loaded = true;
+                                window.refresh();
+                            }
+                            return;
+                        }
                         let Some((preview, enlarged)) =
                             store.preview_mut(message.key, message.generation)
                         else {
                             return;
                         };
                         match message.event {
-                            BrowserEvent::Ready => {
-                                preview.loaded = true;
-                                preview.applied = None;
-                                preview.applied_mode = None;
-                                window.refresh();
-                            }
+                            BrowserEvent::Ready => {}
                             BrowserEvent::Action { action } => {
                                 match action {
                                     PreviewAction::Download => {
@@ -246,7 +266,7 @@ impl HtmlPreviews {
                                 window.refresh();
                             }
                             BrowserEvent::Height { height } => {
-                                if !enlarged && height.is_finite() {
+                                if !enlarged && !preview.streaming && height.is_finite() {
                                     let height = height.ceil().clamp(64.0, MAX_HEIGHT);
                                     if (height - preview.height).abs() >= 1.0 {
                                         preview.height = height;
@@ -380,13 +400,20 @@ impl HtmlPreviews {
         key: RowKey,
         html: &str,
         source_prefix: &str,
+        prepared: bool,
         selection: &crate::rendering::SelectionFrame,
         cx: &mut App,
     ) -> AnyElement {
         let colors = palette(cx);
         let dark = cx.theme().is_dark();
         let mut store = self.store.borrow_mut();
-        if store.entries.get(&key).is_none_or(|p| p.source != html) {
+        if !store.entries.contains_key(&key)
+            || prepared
+                && store
+                    .entries
+                    .get(&key)
+                    .is_none_or(|p| p.source != html || p.streaming != open_fence(source_prefix))
+        {
             store.next_generation += 1;
             let generation = store.next_generation;
             if let Some(preview) = store.entries.get_mut(&key) {
@@ -396,15 +423,15 @@ impl HtmlPreviews {
                     generation,
                 );
             } else {
-                store.entries.insert(
-                    key,
-                    Preview::new(
-                        html.to_owned(),
-                        source_prefix.trim_end().to_owned(),
-                        generation,
-                        dark,
-                    ),
+                let mut preview = Preview::new(
+                    html.to_owned(),
+                    source_prefix.trim_end().to_owned(),
+                    generation,
+                    dark,
                 );
+                // A cold preparation has no complete document to publish yet.
+                preview.streaming |= !prepared;
+                store.entries.insert(key, preview);
             }
         }
         let Some(preview) = store.entries.get_mut(&key) else {
@@ -482,11 +509,13 @@ impl HtmlPreviews {
         if state.sidebar.as_ref().is_none_or(|(old, _)| *old != key) {
             let source = inline.source.clone();
             let prefix = inline.source_prefix.clone();
+            let streaming = inline.streaming;
             state.next_generation += 1;
-            state.sidebar = Some((
-                key,
-                Preview::new(source, prefix, state.next_generation, cx.theme().is_dark()),
-            ));
+            let mut preview =
+                Preview::new(source, prefix, state.next_generation, cx.theme().is_dark());
+            // Fence closure alone does not mean a cold inline source is prepared.
+            preview.streaming = streaming;
+            state.sidebar = Some((key, preview));
         }
         let message = messages.iter().find(|message| message.key == key.message)?;
         let namespace = state.namespace.clone();
@@ -546,7 +575,8 @@ impl HtmlPreviews {
                                 cx.notify();
                                 return;
                             };
-                            if preview.source != source {
+                            if preview.source != source || preview.streaming != open_fence(&prefix)
+                            {
                                 store.next_generation += 1;
                                 let next_generation = store.next_generation;
                                 if let Some((preview, true)) = store.preview_mut(key, generation) {
@@ -736,14 +766,34 @@ fn json_script(value: &str) -> String {
         .replace('<', "\\u003c")
 }
 
-fn document(source: &str, dark: bool, generation: u64, token: &str) -> String {
+fn open_fence(prefix: &str) -> bool {
+    let mut lines = prefix.lines();
+    let Some(first) = lines.find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    let opening = first.trim_start();
+    let marker = opening.as_bytes()[0];
+    let count = opening.bytes().take_while(|byte| *byte == marker).count();
+    if !matches!(marker, b'`' | b'~') || count < 3 {
+        return false;
+    }
+    !lines.any(|line| {
+        let closing = line.trim_start_matches(' ');
+        line.len() - closing.len() <= 3
+            && closing.bytes().take_while(|byte| *byte == marker).count() >= count
+            && closing.trim_end().bytes().all(|byte| byte == marker)
+    })
+}
+
+fn document(source: &str, dark: bool, generation: u64, token: &str, streaming: bool) -> String {
     let boot = include_str!("html_preview/document.js");
     let html = format!(
-        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><style>html{{color-scheme:{}}}body{{margin:16px;font:14px/1.5 system-ui;overflow-wrap:anywhere}}img,svg,canvas{{max-width:100%}}</style><script>{boot}</script>{source}",
+        "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><style>html{{color-scheme:{}}}body{{margin:16px;font:14px/1.5 system-ui;overflow-wrap:anywhere}}img,svg,canvas{{max-width:100%}}</style><script>{boot}</script>",
         if dark { "dark" } else { "light" }
     );
     include_str!("html_preview/host.html")
         .replace("__GENERATION__", &generation.to_string())
+        .replace("__STREAMING__", if streaming { "true" } else { "false" })
         .replace("__TOKEN__", &json_script(token))
         .replace("__DARK__", if dark { "true" } else { "false" })
         .replace("__DOCUMENT__", &json_script(&html))
@@ -752,11 +802,11 @@ fn document(source: &str, dark: bool, generation: u64, token: &str) -> String {
 
 /// Load a local Markdown fixture in the complete debug app, with no provider or journal writes.
 #[cfg(debug_assertions)]
-pub(crate) fn native_fixture(mut app: DesktopApp) -> DesktopApp {
+pub(crate) fn native_fixture(mut app: DesktopApp, cx: &mut Context<DesktopApp>) -> DesktopApp {
     let Some(path) = std::env::var_os("CASTLE_PREVIEW_MARKDOWN") else {
         return app;
     };
-    let text = match std::fs::read_to_string(path) {
+    let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) => {
             eprintln!("HTML preview fixture: {error}");
@@ -771,7 +821,7 @@ pub(crate) fn native_fixture(mut app: DesktopApp) -> DesktopApp {
             key: MessageId(u64::MAX),
             revision: 0,
             role: crate::session::Role::Assistant,
-            text,
+            text: text.clone(),
             tool_call_id: None,
             title: None,
             payload: None,
@@ -791,12 +841,53 @@ pub(crate) fn native_fixture(mut app: DesktopApp) -> DesktopApp {
         source_offset: 0,
         local_offset: 0.0,
     });
+    // Editing the fixture replays a stream through the production projection/render path.
+    let mut fixture_message = app.core.session_view.conversation.messages[0].clone();
+    cx.spawn(async move |owner, cx| {
+        let mut previous = text;
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+            let path = path.clone();
+            let next = cx
+                .background_executor()
+                .spawn(async move { std::fs::read_to_string(path) })
+                .await;
+            let Ok(next) = next else { continue };
+            if next == previous {
+                continue;
+            }
+            previous = next.clone();
+            let mut message = (*fixture_message).clone();
+            message.text = next;
+            message.revision += 1;
+            fixture_message = std::sync::Arc::new(message);
+            if owner
+                .update(cx, |app, cx| {
+                    let mut snapshot = (*app.core.session_view).clone();
+                    snapshot.conversation.messages.clear();
+                    snapshot
+                        .conversation
+                        .messages
+                        .push_back(fixture_message.clone());
+                    app.core.session_view = std::sync::Arc::new(snapshot);
+                    cx.notify();
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+    .detach();
     app
 }
 
 fn create_browser(
     source: &str,
     dark: bool,
+    streaming: bool,
     key: RowKey,
     generation: u64,
     sender: mpsc::Sender<Envelope>,
@@ -811,7 +902,7 @@ fn create_browser(
     let token = harness::SessionId::new().to_string();
     let expected_token = token.clone();
     let builder = wry::WebViewBuilder::new()
-        .with_html(document(source, dark, generation, &token))
+        .with_html(document(source, dark, generation, &token, streaming))
         .with_visible(false)
         .with_focused(false)
         .with_incognito(true)
@@ -845,7 +936,6 @@ fn create_browser(
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let view = builder.build_as_child(window);
     Ok(NativeBrowser {
-        token,
         view: view.map_err(|error| error.to_string())?,
         #[cfg(target_os = "macos")]
         clip,
@@ -888,7 +978,6 @@ fn linux_parent(window: &Window) -> Result<wry::raw_window_handle::WindowHandle<
 }
 
 struct NativeBrowser {
-    token: String,
     // Drop WebKit before removing its retained native parent.
     view: wry::WebView,
     #[cfg(target_os = "macos")]
@@ -1288,6 +1377,7 @@ impl Element for PreviewFrame {
                 match create_browser(
                     &entry.source,
                     entry.dark,
+                    entry.streaming,
                     key,
                     entry.generation,
                     sender.clone(),
@@ -1295,6 +1385,7 @@ impl Element for PreviewFrame {
                 ) {
                     Ok(browser) => {
                         entry.browser = Some(browser);
+                        entry.host_generation = entry.generation;
                         entry.dirty = false;
                     }
                     Err(error) => {
@@ -1306,17 +1397,13 @@ impl Element for PreviewFrame {
             let Some(browser) = &entry.browser else {
                 continue;
             };
-            if entry.dirty {
+            if entry.dirty && entry.loaded {
                 entry.dirty = false;
-                entry.loaded = false;
-                entry.applied = None;
-                browser.release_focus();
-                let _ = browser.set_visible(false);
-                if let Err(error) = browser.load_html(&document(
-                    &entry.source,
-                    entry.dark,
-                    entry.generation,
-                    &browser.token,
+                if let Err(error) = browser.evaluate_script(&format!(
+                    "window.previewUpdate({},{},{})",
+                    json_script(&entry.source),
+                    entry.streaming,
+                    entry.generation
                 )) {
                     entry.error = Some(error.to_string());
                     window.defer(cx, |window, _| window.refresh());
@@ -1352,6 +1439,211 @@ impl Element for PreviewFrame {
 mod tests {
     use super::*;
     use gpui_kit::{TestAppContext, size};
+
+    #[test]
+    fn closing_only_the_fence_finishes_the_document() {
+        for (open, closed) in [
+            ("```html\n<p>Done</p>", "```html\n<p>Done</p>\n```"),
+            (
+                "  ~~~~HTM\n<p>Done</p>\n~~~",
+                "  ~~~~HTM\n<p>Done</p>\n  ~~~~~",
+            ),
+            (
+                "```html\n<p>Done</p>\n``` extra",
+                "```html\n<p>Done</p>\n``` extra\n```",
+            ),
+        ] {
+            let mut preview = Preview::new("<p>Done</p>".into(), open.into(), 1, false);
+            assert!(preview.streaming);
+            preview.replace_source(preview.source.clone(), closed.into(), 2);
+            assert!(!preview.streaming);
+            assert!(preview.dirty);
+            assert_eq!(
+                preview.host_generation, 1,
+                "source updates do not retire the host"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn streaming_keeps_preview_mounted_while_preparation_is_pending(cx: &mut TestAppContext) {
+        let (root, view, cx) = preview_app(
+            cx,
+            "```html\n<h2>Streaming</h2><input value=retained>".into(),
+        );
+        let key = view.update(cx, |app, _| {
+            let mut store = app.html_previews.store.borrow_mut();
+            let (&key, entry) = store.entries.iter_mut().next().unwrap();
+            entry.height = 180.0;
+            entry.source_mode = true;
+            key
+        });
+        for delta in ["\n<p>", "逐步追加", "</p>"] {
+            let (release, gate) = tokio::sync::oneshot::channel();
+            view.update(cx, |app, cx| {
+                app.chat.get_mut().worker_gate = Some(gate);
+                let mut snapshot = (*app.core.session_view).clone();
+                let mut message = (**snapshot.conversation.messages.front().unwrap()).clone();
+                message.text.push_str(delta);
+                message.revision += 1;
+                snapshot
+                    .conversation
+                    .messages
+                    .set(0, std::sync::Arc::new(message));
+                app.core.session_view = std::sync::Arc::new(snapshot);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |app, _| {
+                let store = app.html_previews.store.borrow();
+                let entry = &store.entries[&key];
+                assert!(
+                    entry.placement.is_some(),
+                    "pending preparation must not hide the preview"
+                );
+                assert_eq!(
+                    entry.height, 180.0,
+                    "pending preparation must not reset row height"
+                );
+                assert!(
+                    entry.source_mode,
+                    "pending preparation must retain the browser allocation"
+                );
+            });
+            release.send(()).unwrap();
+            cx.run_until_parked();
+        }
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn cold_closed_sidebar_waits_for_preparation(cx: &mut TestAppContext) {
+        let prefix = "```html\n<p>Ready</p>\n```";
+        let (root, view, cx) = preview_app(cx, prefix.into());
+        view.update_in(cx, |app, window, cx| {
+            let key = *app
+                .html_previews
+                .store
+                .borrow()
+                .entries
+                .keys()
+                .next()
+                .unwrap();
+            app.html_previews.store.borrow_mut().entries.clear();
+            // Mount the semantic HTML row before its first preparation returns.
+            let _ = app.html_previews.render(
+                key,
+                "",
+                prefix,
+                false,
+                &crate::rendering::MessageSelection::new(window, cx).frame(0),
+                cx,
+            );
+            app.html_previews.store.borrow_mut().expanded = Some(key);
+            app.core.surface = crate::app::Surface::Trajectory;
+            let messages = app.core.session_view.conversation.messages.clone();
+            assert!(app.html_previews.sidebar(&messages, window, cx).is_some());
+            // Neither executor has run the sidebar parsing task yet.
+            let store = app.html_previews.store.borrow();
+            let sidebar = &store.sidebar.as_ref().unwrap().1;
+            assert!(sidebar.source.is_empty());
+            assert!(sidebar.source_task.is_some());
+            assert!(
+                sidebar.streaming,
+                "a closed fence cannot publish an unprepared empty document"
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            let sidebar = &store.sidebar.as_ref().unwrap().1;
+            assert!(!sidebar.streaming);
+            assert_eq!(sidebar.source, "<p>Ready</p>");
+            assert!(sidebar.source_task.is_none());
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn fence_only_update_finishes_inline_and_sidebar(cx: &mut TestAppContext) {
+        let (root, view, cx) = preview_app(cx, "```html\n<p>Done</p>".into());
+        view.update(cx, |app, cx| {
+            let mut store = app.html_previews.store.borrow_mut();
+            store.expanded = Some(*store.entries.keys().next().unwrap());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.update(cx, |app, cx| {
+            let mut snapshot = (*app.core.session_view).clone();
+            let mut message = (**snapshot.conversation.messages.front().unwrap()).clone();
+            message.text.push_str("\n```");
+            message.revision += 1;
+            snapshot
+                .conversation
+                .messages
+                .set(0, std::sync::Arc::new(message));
+            app.core.session_view = std::sync::Arc::new(snapshot);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            assert!(!store.entries.values().next().unwrap().streaming);
+            assert!(!store.sidebar.as_ref().unwrap().1.streaming);
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn initial_ready_survives_source_updates(cx: &mut TestAppContext) {
+        let (root, view, cx) = preview_app(cx, "```html\n<p>Start</p>".into());
+        let (sender, key, old_generation) = view.update(cx, |app, _| {
+            let mut store = app.html_previews.store.borrow_mut();
+            let key = *store.entries.keys().next().unwrap();
+            let preview = store.entries.get_mut(&key).unwrap();
+            let generation = preview.generation;
+            preview.replace_source(
+                "<p>Start</p><p>Next</p>".into(),
+                "```html\n<p>Start</p>".into(),
+                generation + 1,
+            );
+            let host_generation = preview.host_generation;
+            (store.sender.clone(), key, host_generation)
+        });
+        sender
+            .try_send(Envelope {
+                key,
+                generation: old_generation,
+                event: BrowserEvent::Ready,
+            })
+            .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            assert!(
+                store.entries[&key].loaded,
+                "readiness belongs to the retained host"
+            );
+            assert!(
+                store.entries[&key].dirty,
+                "latest source still needs publication"
+            );
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -1818,7 +2110,7 @@ mod tests {
     #[test]
     fn document_is_an_opaque_sandbox_and_cannot_escape_host_script() {
         let source = "</script><script>parent.document.body.textContent='escape __SOURCE__ __DOCUMENT__'</script>";
-        let html = document(source, true, 1, "test-capability");
+        let html = document(source, true, 1, "test-capability", false);
         assert!(html.contains("sandbox=\"allow-scripts\""));
         assert_eq!(
             html.matches("test-capability").count(),
@@ -1837,8 +2129,8 @@ mod tests {
         assert!(html.contains("frame-src 'none'"));
         assert_eq!(
             html.matches("escape __SOURCE__ __DOCUMENT__").count(),
-            2,
-            "template-like user content must survive both source and preview serialization"
+            1,
+            "template-like user content must survive source serialization"
         );
     }
     fn preview_app(

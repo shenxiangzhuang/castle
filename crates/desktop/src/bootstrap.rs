@@ -180,7 +180,7 @@ fn open_desktop_window(
         cx.new(|cx| {
             let app = DesktopApp::new(startup, window, cx);
             #[cfg(debug_assertions)]
-            let app = html_preview::native_fixture(app);
+            let app = html_preview::native_fixture(app, cx);
             app
         })
     })?;

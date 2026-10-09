@@ -44,7 +44,7 @@ const body = {
 };
 runInNewContext(readFileSync(`${__dirname}/../src/chat/html_preview/document.js`, 'utf8'), {
   parent: parentWindow,
-  document: { body, elementFromPoint: () => root, documentElement: root, scrollingElement: root, fonts: { ready: { then() {} } } },
+  document: { currentScript: {dataset:{}}, body, elementFromPoint: () => root, documentElement: root, scrollingElement: root, fonts: { ready: { then() {} } } },
   Element, WheelEvent,
   addEventListener: (name, callback, options) => { (options?.capture ? captures : events)[name] = callback; },
   getComputedStyle: node => ({ marginBottom: '0', overflowX: 'visible', overflowY: node.style['overflow-y'] || 'visible', ...node.style }),
@@ -78,6 +78,9 @@ const measurements = messages.length;
 events.message({source:parentWindow, data:{kind:'expanded', value:false}});
 flush();
 assert.equal(messages.length, measurements + 1, 'returning from the sidebar republishes the inline height');
+const partialCount = messages.length;
+events.message({source:parentWindow, data:{kind:'content', source:'<p>Partial</p><script>const x =', streaming:true, generation:1}});
+assert.equal(messages.length, partialCount, 'the document must reject partial markup before parsing it');
 console.log('HTML preview bootstrap: suspended-frame expand/collapse passed');
 
 // Reproduce the native trace: no DOM wheel event arrives at all.
@@ -230,28 +233,34 @@ const element = () => ({
     add(name) { this.values.add(name); }, remove(name) { this.values.delete(name); } },
   setAttribute(name, value) { this.attributes[name] = value; }, focus() { this.focused = true; },
 });
-const frame = { ...element(), contentWindow: { postMessage() {} }, addEventListener() {} };
+const frameEvents = {};
+const frame = { ...element(), contentWindow: { postMessage() {} }, addEventListener(name, callback) { frameEvents[name] = callback; } };
 const elements = { iframe: frame };
-for (const id of ['source', 'tools', 'download', 'expand', 'code']) elements['#'+id] = element();
+for (const id of ['source', 'tools', 'download', 'expand', 'code', 'error', 'loading']) elements['#'+id] = element();
 const bodyElement = element();
 const hostWindow = {
   ipc: { postMessage: message => ipc.push(JSON.parse(message)) },
   addEventListener: (name, callback) => { hostEvents[name] = callback; },
 };
-const host = readFileSync(`${__dirname}/../src/chat/html_preview/host.html`, 'utf8')
-  .split('<script>')[1].split('</script>')[0]
+const hostTemplate = readFileSync(`${__dirname}/../src/chat/html_preview/host.html`, 'utf8');
+const host = hostTemplate.slice(hostTemplate.indexOf('<script>') + '<script>'.length)
+  .split('</script>')[0]
   .replaceAll('__TOKEN__', JSON.stringify('host-capability')).replaceAll('__GENERATION__', '42').replaceAll('__DARK__', 'false')
-  .replace('__DOCUMENT__', JSON.stringify('<p>Current document</p>'))
+  .replaceAll('__STREAMING__', 'true')
+  .replace('__DOCUMENT__', JSON.stringify('<script>/* bootstrap */</script>'))
   .replace('__SOURCE__', JSON.stringify('<p>Current document</p>'));
 runInNewContext(host, {
   window: hostWindow,
   document: { querySelector: selector => elements[selector], documentElement: element(), body: bodyElement },
+
 });
 assert.deepEqual(ipc[0], { kind: 'ready', generation: 42, token: 'host-capability' });
-hostEvents.message({ source: frame.contentWindow, data: { kind: 'height', height: 233, generation: 1 } });
-assert.deepEqual(ipc[1], { kind: 'height', height: 233, generation: 42, token: 'host-capability' });
+hostEvents.message({ source: frame.contentWindow, data: { kind: 'height', height: 999, generation: 1 } });
+assert.equal(ipc.length, 1, 'ignore stale content inside the retained browser');
+hostEvents.message({ source: frame.contentWindow, data: { kind: 'height', height: 233, generation: 42 } });
+assert.equal(ipc.length, 1, 'unpublished document measurements must not resize the loader');
 hostEvents.message({ source: {}, data: { kind: 'height', height: 999 } });
-assert.equal(ipc.length, 2, 'ignore messages outside the sandboxed document');
+assert.equal(ipc.length, 1, 'ignore messages outside the sandboxed document');
 console.log('HTML preview host: document generation routing passed');
 
 const payload = frame.srcdoc;
@@ -278,7 +287,7 @@ assert(elements['#source'].focused);
 hostEvents.keydown({key:'Escape'});
 assert.equal(ipc.at(-1).action, 'source', 'Escape closes source before the enlarged preview');
 hostWindow.previewMode(true, false);
-hostEvents.message({source:frame.contentWindow, data:{kind:'escape'}});
+hostEvents.message({source:frame.contentWindow, data:{kind:'escape', generation:42}});
 assert.equal(ipc.at(-1).action, 'dismiss');
 assert.equal(frame.srcdoc, payload, 'source and enlarged modes retain the running iframe');
 hostWindow.previewMode(false, false);
@@ -295,7 +304,7 @@ assert.equal(elements['#tools'].style.right, 'calc(100% - 600px + 28px)');
 // Exercise the exact host -> opaque frame -> IPC route, without dispatching DOM wheel.
 frame.getBoundingClientRect = () => ({left:0, top:0});
 frame.contentWindow.postMessage = data => events.message({source:parentWindow, data});
-parentWindow.postMessage = data => hostEvents.message({source:frame.contentWindow, data});
+parentWindow.postMessage = data => hostEvents.message({source:frame.contentWindow, data:{...data, generation:42}});
 root.scrollHeight = root.clientHeight;
 root.scrollTop = 0;
 let routed = ipc.length;
@@ -343,3 +352,39 @@ assert.equal(sourceWheel(0, 40).forwarded, 0, 'sidebar source never scrolls chat
 sourceElement.scrollTop = 0;
 assert.equal(sourceWheel(0, -40).forwarded, 0);
 console.log('HTML preview source: DOM handoff, single consumption and sidebar isolation passed');
+
+// The loader owns a fixed viewport until the complete document has initialized.
+const streamed = [];
+frame.contentWindow.postMessage = data => streamed.push(data);
+const originalDocument = frame.srcdoc;
+hostWindow.previewUpdate('<p>Growing</p><script>const value =', true, 43);
+frameEvents.load();
+for (let revision = 44; revision < 47; revision++) {
+  hostWindow.previewUpdate(`<p>Growing ${revision}</p>`, true, revision);
+  assert(bodyElement.classList.values.has('rendering'), 'loader remains mounted through every append');
+}
+assert.equal(streamed.filter(data => data.kind === 'content').length, 0, 'never publish partial HTML');
+assert.equal(frame.srcdoc, originalDocument, 'streaming must not restart the host or loader');
+const beforeHeight = ipc.length;
+hostEvents.message({source:frame.contentWindow, data:{kind:'height', height:64, generation:46}});
+assert.equal(ipc.length, beforeHeight, 'empty bootstrap height cannot move the loading indicator');
+hostWindow.previewUpdate('<p>Done</p><script>const value = 1;</script>', false, 47);
+const completedDocument = frame.srcdoc;
+assert.equal(completedDocument, '<script data-generation="47" data-expanded="true">/* bootstrap */</script><p>Done</p><script>const value = 1;</script>',
+  'install the untouched complete HTML once through the parser');
+assert(bodyElement.classList.values.has('rendering'), 'wait for initialization before revealing the page');
+hostEvents.message({source:frame.contentWindow, data:{kind:'rendered', generation:46}});
+assert(bodyElement.classList.values.has('rendering'), 'stale completion cannot dismiss the loader');
+hostEvents.message({source:frame.contentWindow, data:{kind:'height', height:360, generation:47}});
+assert.equal(ipc.length, beforeHeight, 'initial layout remains hidden until completion');
+hostEvents.message({source:frame.contentWindow, data:{kind:'rendered', generation:47}});
+assert(!bodyElement.classList.values.has('rendering'), 'reveal the initialized page atomically');
+assert.equal(ipc.at(-1).height, 360, 'publish its measured height on reveal');
+hostWindow.previewUpdate('<p>Done</p><script>const value = 1;</script>', false, 47);
+assert.equal(frame.srcdoc, completedDocument, 'repeated updates cannot rerun the document');
+hostEvents.message({source:frame.contentWindow, data:{kind:'error', message:'Unexpected identifier', generation:46}});
+assert.equal(elements['#error'].textContent, '', 'stale errors cannot poison the completed preview');
+hostEvents.message({source:frame.contentWindow, data:{kind:'error', message:'Unexpected identifier', generation:47}});
+assert.equal(elements['#error'].textContent, 'HTML: Unexpected identifier', 'invalid generated scripts have a visible error');
+assert.equal(ipc.at(-1).generation, 47);
+console.log('HTML preview publication: complete-only rendering, stable loading, stale callbacks and visible errors passed');

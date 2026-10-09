@@ -1,7 +1,8 @@
 (() => {
-  const send = data => parent.postMessage(data, '*');
+  const generation = Number(document.currentScript.dataset.generation || 0);
+  const send = data => parent.postMessage({...data, generation}, '*');
   const forwardedWheels = new WeakSet();
-  let scheduled = false, lastHeight = 0, expanded = false;
+  let scheduled = false, lastHeight = 0, expanded = document.currentScript.dataset.expanded === 'true';
   const measure = () => {
     scheduled = false;
     if (!document.body) return;
@@ -22,14 +23,21 @@
     if (!scheduled) { scheduled = true; queueMicrotask(measure); }
   };
   addEventListener('DOMContentLoaded', () => {
-    document.documentElement.style.setProperty('overflow-y', 'auto', 'important');
+    document.documentElement.style.setProperty('overflow-y', expanded ? 'scroll' : 'auto', 'important');
     document.documentElement.style.setProperty('overscroll-behavior', 'none', 'important');
     const observer = new ResizeObserver(schedule);
     observer.observe(document.body);
     new MutationObserver(schedule).observe(document.body, {subtree:true, childList:true, attributes:true, characterData:true});
     schedule();
-  });
-  addEventListener('load', schedule);
+  }, {once:true});
+  addEventListener('load', () => {
+    schedule();
+    // Native document loading waits for module scripts before firing load.
+    if (generation) document.fonts.ready.then(() => queueMicrotask(() => {
+      measure();
+      send({kind:'rendered'});
+    }));
+  }, {once:true});
   addEventListener('resize', schedule);
   document.fonts.ready.then(schedule);
   addEventListener('message', event => {

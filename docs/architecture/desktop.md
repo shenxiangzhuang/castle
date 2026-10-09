@@ -232,6 +232,12 @@ append; the regression requires unchanged geometry, rich intermediate frames and
 append. A second test checks progress during continued appends and rejection after rewrite/switch.
 These are GPUI headless layout checks, not a native display frame-time measurement.
 
+When source revisions preserve row identities, Chat remeasures existing list entries while
+retaining their size hints and scroll position. It splices entries only when row identities change.
+This prevents the right scrollbar from briefly shrinking/disappearing between index publication
+and the next list paint. A headless regression checks scroll range and offset at that intermediate
+boundary, before layout has had a chance to settle.
+
 ### Desktop platform presentation
 
 All desktop builds embed unmodified SIL OFL Source Han Sans CN (Latin/CJK) and Source Code Pro
@@ -264,9 +270,21 @@ and HTML nested inside another Markdown container is not promoted to a separate 
 
 `HtmlPreviews` owns live browser instances per window and active projection namespace. Identity is
 (message ID, field, source offset); content replacement allocates a monotonically increasing
-document generation. Streaming appends reload HTML inside the existing native browser, retaining
-measured height and source/preview mode instead of constructing another WebView. The browser is
-hidden until the current host reports readiness. Standalone HTML skips unused syntax highlighting.
+document generation. While a fence is open, the retained host shows a centered loading indicator
+in a fixed-height viewport. Partial HTML never enters the iframe DOM; there are no timed or
+rate-limited updates. Fence closure and source preparation publish the complete document once,
+including a close-only update with unchanged HTML. A cold sidebar inherits the inline preparation
+state and cannot publish an empty document just because its fence is closed. Publication assigns
+the bootstrap followed by the original HTML to the retained iframe's `srcdoc` once. The browser's
+parser owns script execution and the native DOM-ready/load events, including module scripts;
+the renderer does not recreate scripts or synthesize initialization events. The opaque iframe stays
+hidden until document load and font readiness acknowledge completion. Its initial height is buffered
+and published on reveal; bootstrap/partial measurements cannot resize the loading row. Scripts run
+once. Loading honors reduced motion and stays hidden in Source mode. Invalid generated scripts are shown inside
+the preview and remain accessible through Source. The bootstrap and CSP are outside model-owned
+source. Browser readiness uses its allocation generation independently of source generations, so
+early source updates cannot discard the initial ready callback. Content callbacks retain source
+generation checks. Standalone HTML skips unused syntax highlighting.
 Appends outside a completed block preserve both its browser and document runtime. The canonical
 source prefix is also checked on each frame so removed/rewritten blocks cannot retain an obsolete
 browser. The trusted host stamps callbacks with its document generation; callbacks from retired documents cannot
@@ -274,7 +292,7 @@ resize or manipulate a replacement. These objects never enter the journal or the
 
 Visible documents are created automatically and independently. Multiple browsers may be visible
 and interactive together. Offscreen documents are hidden but retained for the active session, so
-DOM, JavaScript closures, canvas and input state survive list virtualization. A retained document
+DOM, JavaScript closures, canvas and input state survive list virtualization. An HTML semantic row mounts the same host even before its first prepared document is ready. A retained document
 is mounted immediately even when its prepared Markdown has been evicted, without a source-text
 placeholder while the preparation cache warms again. Session/projection
 switches and window teardown release the documents; app restart does not restore browser state.
@@ -436,6 +454,14 @@ CASTLE_DATA_DIR=/tmp/castle-html-check \
 CASTLE_PREVIEW_MARKDOWN="$PWD/crates/desktop/tests/fixtures/html-previews.md" \
   target/Castle.app/Contents/MacOS/castle
 ```
+
+In debug builds, editing the fixture file updates the same assistant message through the production
+render path. Replay append-only snapshots: only the fixed loading placeholder should be visible,
+and its height and the right Chat scrollbar's range/offset must stay stable. Then close the fence
+without changing its HTML: the initialized page should appear once. Edit an input and append prose
+outside the completed fence: its value and focus must survive, and scripts must not run again.
+Incomplete scripts must never execute or report syntax errors. Rewrite the fixture to
+replay malformed generated code: its script error must be visible in the preview.
 
 Use the two independent sliders, expand/collapse the explanation, scroll both documents fully
 out of view and back, resize the window, switch source/preview, open/close the right preview sidebar,

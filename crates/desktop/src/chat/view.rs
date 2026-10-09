@@ -375,6 +375,7 @@ impl DesktopApp {
                                 .map(std::borrow::Cow::Owned)
                         })
                     })
+                    .or_else(|| row.is_html().then_some(std::borrow::Cow::Borrowed("")))
             } else {
                 None
             };
@@ -382,8 +383,14 @@ impl DesktopApp {
             let plain_selector = (prepared.is_none() && html.is_none())
                 .then(|| format!("chat-plain:{}", row.message.key.0));
             let content = if let Some(html) = html {
-                self.html_previews
-                    .render(row.key, &html, row.plain(), &selection, cx)
+                self.html_previews.render(
+                    row.key,
+                    &html,
+                    row.plain(),
+                    prepared.is_some(),
+                    &selection,
+                    cx,
+                )
             } else if let Some(prepared) = prepared {
                 markdown::render_prepared_markdown(
                     row.message.key.0,
